@@ -1,0 +1,7 @@
+﻿version: "3.9"
+services:
+  bot:
+    build: .
+    command: ["python","-m","http.server","8000"]
+    ports:
+      - "8000:8000"

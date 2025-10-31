@@ -1,0 +1,13 @@
+﻿pandas
+numpy
+ccxt
+backtesting
+ta
+scikit-learn
+fastapi
+streamlit
+python-telegram-bot
+yfinance
+sqlalchemy
+uvicorn
+apscheduler
