@@ -1,0 +1,1352 @@
+
+diff --git a/trading-bot/.env b/trading-bot/.env
+new file mode 100644
+index 0000000000000000000000000000000000000000..59b26a4d04444fe8444c0905f3e2f9bd248b2ae0
+--- /dev/null
++++ b/trading-bot/.env
+@@ -0,0 +1,13 @@
++BINANCE_API_KEY=XshzHb4vg2p7vS1Yw0LZHrunJacnfEO8yO5Gu9mKgKZ6cj9l1Q87d8ctuhlnk8Eo
++BINANCE_API_SECRET=xzIJefIOcGXlByM0FObOdbJr2C1jjtP3YaKZEi4EehjcuyIFyouxtqOAJbyvKubz
++BINANCE_TESTNET=true
++BASE_SYMBOLS=BTC/USDT,ETH/USDT
++TIMEFRAME=1h
++RISK_PER_TRADE=0.01
++MAX_CONCURRENT_POSITIONS=3
++DB_URL=sqlite:///./data/bot.db
++TELEGRAM_BOT_TOKEN=__BOT_TOKEN__
++TELEGRAM_CHAT_ID=__DEIN_CHAT_ID__
++ALLOW_TOGGLE=false
++STATE_PATH=./data/state
++POLL_INTERVAL_SECONDS=60
+diff --git a/trading-bot/.env.example b/trading-bot/.env.example
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d35fdea9667f3a0f65d826b290d575b88f4b4f1
+--- /dev/null
++++ b/trading-bot/.env.example
+@@ -0,0 +1,18 @@
++BINANCE_API_KEY=
++BINANCE_API_SECRET=
++BINANCE_TESTNET=true
++TELEGRAM_BOT_TOKEN=
++TELEGRAM_CHAT_ID=
++BASE_SYMBOLS=BTC/USDT,ETH/USDT
++TIMEFRAME=1h
++RISK_PER_TRADE=0.01
++MAX_CONCURRENT_POSITIONS=3
++DB_URL=sqlite:///./data/bot.db
++ALLOW_TOGGLE=false
++STATE_PATH=./data/state
++POLL_INTERVAL_SECONDS=60
++MAX_DAILY_LOSS=0.03
++MAX_TOTAL_EXPOSURE=0.8
++SLIPPAGE_BPS=5
++TAKER_FEE_BPS=10
++MODEL_THRESHOLD=0.55
+diff --git a/trading-bot/.github/workflows/offline-ci.yml b/trading-bot/.github/workflows/offline-ci.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c7f407bdfc629f6c1421b74141aaa98e7f50b2c2
+--- /dev/null
++++ b/trading-bot/.github/workflows/offline-ci.yml
+@@ -0,0 +1,40 @@
++name: Offline CI
++
++on:
++  push:
++    branches: [ "main" ]
++  pull_request:
++    branches: [ "main" ]
++
++jobs:
++  test:
++    runs-on: ubuntu-latest
++    env:
++      USE_OFFLINE_WHEELS: "1"
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.11"
++
++      - name: Install dependencies from wheelhouse
++        run: |
++          python -m pip install --upgrade pip
++          if [[ "${USE_OFFLINE_WHEELS}" == "1" ]]; then
++            find wheelhouse -type f -name "*.whl" -print0 | xargs -0 python -m pip install --no-index --find-links=wheelhouse
++          else
++            python -m pip install -r requirements.txt
++          fi
++
++      - name: Run offline tests
++        run: |
++          python scripts/offline_tests.py
++
++      - name: Upload pytest results
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: offline-tests
++          path: ./.pytest-cache
+diff --git a/trading-bot/Dockerfile b/trading-bot/Dockerfile
+new file mode 100644
+index 0000000000000000000000000000000000000000..051575141f1d7636e4f8a97619b70f9c698037a6
+--- /dev/null
++++ b/trading-bot/Dockerfile
+@@ -0,0 +1,25 @@
++FROM python:3.11-slim
++
++ENV POETRY_VERSION=1.7.1 \
++    PYTHONDONTWRITEBYTECODE=1 \
++    PYTHONUNBUFFERED=1 \
++    USE_OFFLINE_WHEELS=1
++
++WORKDIR /app
++
++COPY wheelhouse /app/wheelhouse
++COPY requirements.txt /app/requirements.txt
++
++RUN python -m pip install --upgrade pip && \
++    if [ "$USE_OFFLINE_WHEELS" = "1" ]; then \
++        find wheelhouse -type f -name "*.whl" -print0 | xargs -0 python -m pip install --no-index --find-links=wheelhouse; \
++    else \
++        python -m pip install -r requirements.txt; \
++    fi
++
++COPY . /app
++
++CMD ["python", "-m", "src.main", "paper"]
++
++EXPOSE 8000
++EXPOSE 8501
+diff --git a/trading-bot/README.md b/trading-bot/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b1d0c31c6f8d65f4d51ec53291f32b237fb64910
+--- /dev/null
++++ b/trading-bot/README.md
+@@ -0,0 +1,71 @@
++# TradeIt Bot
++
++## Setup
++
++1. Create and activate a Python 3.11 virtual environment.
++2. Install dependencies:
++   ```bash
++   pip install -r requirements.txt
++   ```
++3. Copy `.env.example` to `.env` and update credentials.
++
++## Running
++
++### Backtest
++
++```bash
++python -m src.main backtest --symbols BTC/USDT,ETH/USDT --timeframe 1h --start 2022-01-01 --end 2023-01-01 --strategy ensemble
++```
++
++### Paper Trading
++
++```bash
++python -m src.main paper
++```
++
++### Live Trading
++
++```bash
++python -m src.main live
++```
++
++### Reports
++
++```bash
++python -m src.main report --daily
++python -m src.main report --weekly
++```
++
++### Streamlit UI
++
++```bash
++python -m src.main ui
++```
++
++## Docker Compose
++
++Ensure `USE_OFFLINE_WHEELS=1` to avoid proxy issues.
++
++```bash
++docker compose up --build -d
++```
++
++Services:
++- `bot`: Paper trading loop.
++- `api`: FastAPI backend.
++- `ui`: Streamlit dashboard.
++
++## Offline/Proxy Notes
++
++- Place pre-built wheels in `wheelhouse/`.
++- Set `USE_OFFLINE_WHEELS=1` to force offline installs in CI and Docker.
++
++## Testing
++
++```bash
++pytest -q
++```
++
++## Security & Risk
++
++- Keep API keys in `.env`, never commit secrets.
++- No leverage or margin in v1.
++- Risk limits: position sizing via ATR, max daily loss, and total exposure caps.
++
++## Reports
++
++- Daily Telegram report at 08:00 Europe/Berlin.
++- Weekly summary on Sundays at 18:00.
+diff --git a/trading-bot/data/.gitignore b/trading-bot/data/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..ded82a14a7774eb8610537884d769abe0454bc22
+--- /dev/null
++++ b/trading-bot/data/.gitignore
+@@ -0,0 +1,3 @@
++bot.db
++state/
++*.sqlite3
+diff --git a/trading-bot/data/.gitkeep b/trading-bot/data/.gitkeep
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/trading-bot/docker-compose.yml b/trading-bot/docker-compose.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..12c45a6622ba5b28f071f4e3444522653a557fdc
+--- /dev/null
++++ b/trading-bot/docker-compose.yml
+@@ -0,0 +1,36 @@
++version: "3.9"
++
++services:
++  bot:
++    build: .
++    container_name: tradeit-bot
++    env_file:
++      - .env
++    environment:
++      USE_OFFLINE_WHEELS: "1"
++    volumes:
++      - ./data:/app/data
++    command: ["python", "-m", "src.main", "paper"]
++
++  api:
++    build: .
++    container_name: tradeit-api
++    env_file:
++      - .env
++    environment:
++      USE_OFFLINE_WHEELS: "1"
++    volumes:
++      - ./data:/app/data
++    command: ["uvicorn", "src.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
++    ports:
++      - "8000:8000"
++    depends_on:
++      - bot
++
++  ui:
++    build: .
++    container_name: tradeit-ui
++    env_file:
++      - .env
++    command: ["streamlit", "run", "src/ui/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
++    ports:
++      - "8501:8501"
+diff --git a/trading-bot/requirements.txt b/trading-bot/requirements.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..43636814cc8b5454f5e63d38d5823db1ea01f646
+--- /dev/null
++++ b/trading-bot/requirements.txt
+@@ -0,0 +1,23 @@
++ccxt==4.1.6
++pandas==2.2.1
++numpy==1.26.4
++scipy==1.11.4
++pandas_ta==0.3.14b0
++backtesting==0.3.3
++scikit-learn==1.4.0
++joblib==1.3.2
++fastapi==0.110.0
++uvicorn==0.27.0
++streamlit==1.30.0
++python-telegram-bot==20.6
++yfinance==0.2.36
++SQLAlchemy==2.0.25
++alembic==1.13.1
++pydantic-settings==2.1.0
++python-dotenv==1.0.1
++tenacity==8.2.3
++APScheduler==3.10.4
++tabulate==0.9.0
++plotly==5.18.0
++pytest==7.4.4
++pytest-mock==3.12.0
+diff --git a/trading-bot/scripts/offline_tests.py b/trading-bot/scripts/offline_tests.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7da17d5731f90cf0f091fbf721a8450b4bf5c908
+--- /dev/null
++++ b/trading-bot/scripts/offline_tests.py
+@@ -0,0 +1,156 @@
++from __future__ import annotations
++
++import importlib
++import sys
++from pathlib import Path
++
++
++def _ensure_module(module: str) -> None:
++    try:
++        importlib.import_module(module)
++    except ImportError as exc:
++        print(f"[offline-tests] Missing dependency: {module} ({exc})")
++        sys.exit(1)
++
++
++def main() -> None:
++    root = Path(__file__).resolve().parents[1]
++    sys.path.insert(0, str(root / "src"))
++
++    required_modules = [
++        "pandas",
++        "numpy",
++        "backtesting",
++        "sklearn",
++        "fastapi",
++        "uvicorn",
++        "streamlit",
++    ]
++    for mod in required_modules:
++        _ensure_module(mod)
++
++    import pytest
++
++    print("[offline-tests] running pytest")
++    result = pytest.main(["-q", str(root / "tests")])
++    if result != 0:
++        sys.exit(result)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/trading-bot/src/__init__.py b/trading-bot/src/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/trading-bot/src/api/__init__.py b/trading-bot/src/api/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/trading-bot/src/api/server.py b/trading-bot/src/api/server.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d077ae1d678195f8c8dad19906b301311527dc3
+--- /dev/null
++++ b/trading-bot/src/api/server.py
+@@ -0,0 +1,44 @@
++from __future__ import annotations
++
++from dataclasses import asdict
++from typing import Dict
++
++from fastapi import FastAPI
++
++from ..config import get_settings
++from ..state.store import (
++    compute_equity_metrics,
++    load_status,
++)
++
++app = FastAPI(title="TradeIt Bot API")
++
++
++@app.get("/health")
++def health() -> Dict[str, str]:
++    return {"status": "ok"}
++
++
++@app.get("/config")
++def config_view() -> Dict[str, object]:
++    settings = get_settings()
++    return asdict(settings)
++
++
++@app.get("/status")
++def status() -> Dict[str, object]:
++    settings = get_settings()
++    default_mode = "paper" if (settings.binance_testnet or not settings.binance_api_key) else "live"
++    payload = load_status(default_mode=default_mode)
++    payload.setdefault("mode", default_mode)
++    payload.setdefault("paused", False)
++    return payload
++
++
++@app.get("/metrics")
++def metrics() -> Dict[str, float]:
++    equity = compute_equity_metrics()
++    return {"sharpe": equity.sharpe, "max_drawdown": equity.max_drawdown}
++
++
++__all__ = ["app"]
+diff --git a/trading-bot/src/backtest/__init__.py b/trading-bot/src/backtest/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/trading-bot/src/backtest/engine.py b/trading-bot/src/backtest/engine.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef00b2eaef7af59527d4679abf2b0aa8e88b49e9
+--- /dev/null
++++ b/trading-bot/src/backtest/engine.py
+@@ -0,0 +1,80 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Dict, Iterable, List
++
++import numpy as np
++import pandas as pd
++from backtesting import Backtest, Strategy
++
++from ..strategy.base import StrategySignals
++from ..strategy.ensemble import EnsembleStrategy
++from ..strategy.momentum_rsi import MomentumRSIStrategy
++from ..strategy.mean_reversion import MeanReversionStrategy
++from ..strategy.breakout_atr import BreakoutATRStrategy
++from ..strategy.position_sizing import position_size
++
++
++@dataclass
++class BacktestResult:
++    equity: float
++    trades: int
++    stats: Dict[str, float]
++
++
++def run_backtest(
++    data: Dict[str, pd.DataFrame],
++    strategies: Iterable[str],
++    risk_per_trade: float,
++) -> BacktestResult:
++    combined = _prepare_data(data)
++    strategy = _build_strategy(strategies)
++    bt = Backtest(
++        combined,
++        strategy,
++        cash=10_000,
++        commission=0.001,
++        trade_on_close=True,
++    )
++    stats = bt.run()
++    return BacktestResult(
++        equity=float(stats["Equity Final [$]"]),
++        trades=int(stats["# Trades"]),
++        stats={k: float(v) for k, v in stats.items() if isinstance(v, (int, float, np.number))},
++    )
++
++
++def _prepare_data(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
++    frames = []
++    for symbol, df in data.items():
++        frame = df.copy()
++        frame["symbol"] = symbol
++        frames.append(frame)
++    combined = pd.concat(frames).sort_values(["timestamp", "symbol"])
++    combined.set_index("timestamp", inplace=True)
++    return combined
++
++
++def _build_strategy(strategies: Iterable[str]) -> Strategy:
++    mapping = {
++        "momentum_rsi": MomentumRSIStrategy(),
++        "mean_reversion": MeanReversionStrategy(),
++        "breakout_atr": BreakoutATRStrategy(),
++    }
++    selected = [mapping[name] for name in strategies]
++    if not selected:
++        selected = [MomentumRSIStrategy()]
++    if len(selected) == 1:
++        return _wrap_strategy(selected[0])
++    return _wrap_strategy(EnsembleStrategy(selected))
++
++
++def _wrap_strategy(strategy_impl) -> Strategy:
++    class WrappedStrategy(Strategy):
++        def init(self):
++            pass
++
++        def next(self):
++            df = self.data.df
++            signals: StrategySignals = strategy_impl.generate_signals(df)
++            position = signals.entries.iloc[-1]
++            if position == 1 and not self.position:
++                size = position_size(self.equity, self.data.Close[-1], signals.atr.iloc[-1], 0.01, 2.0)
++                self.buy(size=size)
++            elif position == 0 and self.position:
++                self.position.close()
++
++    return WrappedStrategy
+diff --git a/trading-bot/src/backtest/metrics.py b/trading-bot/src/backtest/metrics.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e29e331eb8cde32e12bd2b20fe9742c4ddc04af5
+--- /dev/null
++++ b/trading-bot/src/backtest/metrics.py
+@@ -0,0 +1,57 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Dict
++
++import numpy as np
++import pandas as pd
++
++
++@dataclass
++class PerformanceMetrics:
++    cagr: float
++    sharpe: float
++    sortino: float
++    max_drawdown: float
++    win_rate: float
++    profit_factor: float
++
++
++def compute_metrics(equity_curve: pd.Series, trades: pd.DataFrame) -> PerformanceMetrics:
++    returns = equity_curve.pct_change().dropna()
++    cagr = (equity_curve.iloc[-1] / equity_curve.iloc[0]) ** (365 / len(equity_curve)) - 1
++    sharpe = returns.mean() / (returns.std() + 1e-9) * (len(returns) ** 0.5)
++    downside = returns[returns < 0]
++    sortino = returns.mean() / (downside.std() + 1e-9) * (len(returns) ** 0.5)
++    running_max = equity_curve.cummax()
++    max_drawdown = ((equity_curve / running_max) - 1).min()
++    wins = trades[trades["pnl"] > 0]
++    win_rate = len(wins) / max(len(trades), 1)
++    gross_profit = trades[trades["pnl"] > 0]["pnl"].sum()
++    gross_loss = trades[trades["pnl"] < 0]["pnl"].abs().sum()
++    profit_factor = gross_profit / max(gross_loss, 1e-9)
++    return PerformanceMetrics(
++        cagr=float(cagr),
++        sharpe=float(sharpe),
++        sortino=float(sortino),
++        max_drawdown=float(max_drawdown),
++        win_rate=float(win_rate),
++        profit_factor=float(profit_factor),
++    )
++
++
++def format_metrics(metrics: PerformanceMetrics) -> Dict[str, float]:
++    return {
++        "CAGR": metrics.cagr,
++        "Sharpe": metrics.sharpe,
++        "Sortino": metrics.sortino,
++        "Max Drawdown": metrics.max_drawdown,
++        "Win Rate": metrics.win_rate,
++        "Profit Factor": metrics.profit_factor,
++    }
+diff --git a/trading-bot/src/broker/__init__.py b/trading-bot/src/broker/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/trading-bot/src/broker/binance_adapter.py b/trading-bot/src/broker/binance_adapter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..14fae2bf8f68d7189300591cdf060a8a616f9a32
+--- /dev/null
++++ b/trading-bot/src/broker/binance_adapter.py
+@@ -0,0 +1,136 @@
++from __future__ import annotations
++
++import logging
++import time
++import uuid
++from dataclasses import dataclass
++from typing import Dict, Optional
++
++import ccxt
++from tenacity import retry, stop_after_attempt, wait_exponential
++
++logger = logging.getLogger(__name__)
++
++
++TAKER_FEE_BPS = 10
++
++
++@dataclass
++class OrderResponse:
++    id: str
++    status: str
++    symbol: str
++    side: str
++    price: float
++    amount: float
++
++
++def _mk_exchange(api_key: str, api_secret: str, use_testnet: bool) -> ccxt.binance:
++    opts = {
++        "apiKey": api_key,
++        "secret": api_secret,
++        "enableRateLimit": True,
++        "options": {"defaultType": "spot"},
++        "timeout": 20000,
++    }
++    ex = ccxt.binance(opts)
++    if use_testnet:
++        ex.set_sandbox_mode(True)
++    ex.load_markets()
++    ex.check_required_credentials()
++    try:
++        ex.fetch_time()
++    except Exception:  # pragma: no cover - best effort
++        logger.warning("Failed to fetch exchange time for drift check", exc_info=True)
++    return ex
++
++
++def _cid(tag: str) -> str:
++    return f"{tag}-{uuid.uuid4().hex[:12]}"
++
++
++def _round_qty_px(ex: ccxt.binance, symbol: str, qty: float, price: Optional[float]) -> tuple[float, Optional[float]]:
++    market = ex.market(symbol)
++    rounded_qty = float(ex.amount_to_precision(symbol, qty))
++    rounded_price = float(ex.price_to_precision(symbol, price)) if price is not None else None
++    return rounded_qty, rounded_price
++
++
++class BinanceAdapter:
++    def __init__(self, api_key: str, api_secret: str, use_testnet: bool = True):
++        self.exchange = _mk_exchange(api_key, api_secret, use_testnet)
++
++    @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
++    def get_balance(self) -> Dict[str, float]:
++        balances = self.exchange.fetch_balance()
++        result = {asset: float(info["free"]) for asset, info in balances["free"].items()}
++        logger.debug("Fetched balances: %s", result)
++        return result
++
++    @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
++    def fetch_ohlcv(self, symbol: str, timeframe: str, since: Optional[int] = None, limit: int = 500):
++        logger.debug("Fetching OHLCV for %s %s since=%s limit=%s", symbol, timeframe, since, limit)
++        return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
++
++    @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
++    def create_order(
++        self,
++        symbol: str,
++        side: str,
++        amount: float,
++        price: Optional[float] = None,
++        order_type: str = "market",
++    ) -> OrderResponse:
++        client_id = _cid("tradeit")
++        rounded_amount, rounded_price = _round_qty_px(self.exchange, symbol, amount, price)
++        logger.info(
++            "Creating order: %s %s amount=%s->%s price=%s->%s type=%s",
++            symbol,
++            side,
++            amount,
++            rounded_amount,
++            price,
++            rounded_price,
++            order_type,
++        )
++        response = self.exchange.create_order(
++            symbol,
++            order_type,
++            side,
++            rounded_amount,
++            rounded_price,
++            params={"clientOrderId": client_id},
++        )
++        return OrderResponse(
++            id=response["id"],
++            status=response["status"],
++            symbol=response["symbol"],
++            side=response["side"],
++            price=float(response.get("price") or rounded_price or 0.0),
++            amount=float(response.get("filled") or rounded_amount),
++        )
++
++    @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
++    def fetch_open_orders(self, symbol: Optional[str] = None):
++        return self.exchange.fetch_open_orders(symbol)
++
++    @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
++    def cancel_order(self, order_id: str, symbol: str):
++        return self.exchange.cancel_order(order_id, symbol)
++
++
++def estimate_fee(price: float, amount: float, fee_bps: int = TAKER_FEE_BPS) -> float:
++    return price * amount * (fee_bps / 10_000.0)
+diff --git a/trading-bot/src/broker/paper_wallet.py b/trading-bot/src/broker/paper_wallet.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5787d2ed52ed799bbd16080c3aba367fdcb9acf3
+--- /dev/null
++++ b/trading-bot/src/broker/paper_wallet.py
+@@ -0,0 +1,80 @@
++from __future__ import annotations
++
++import logging
++from dataclasses import dataclass
++from typing import Dict, List, Optional
++
++logger = logging.getLogger(__name__)
++
++
++@dataclass
++class PaperOrder:
++    id: str
++    symbol: str
++    side: str
++    price: float
++    amount: float
++    status: str = "closed"
++
++
++class PaperWallet:
++    def __init__(self, initial_balance: float = 10_000.0, fee_bps: int = 10, slippage_bps: int = 5):
++        self.balance = initial_balance
++        self.fee_bps = fee_bps
++        self.slippage_bps = slippage_bps
++        self.orders: List[PaperOrder] = []
++
++    def _apply_slippage(self, price: float, side: str) -> float:
++        adjustment = price * (self.slippage_bps / 10_000.0)
++        if side.lower() == "buy":
++            return price + adjustment
++        return price - adjustment
++
++    def create_order(self, symbol: str, side: str, amount: float, price: float) -> PaperOrder:
++        filled_price = self._apply_slippage(price, side)
++        cost = filled_price * amount
++        fee = cost * (self.fee_bps / 10_000.0)
++        total_cost = cost + fee if side.lower() == "buy" else cost - fee
++        if side.lower() == "buy":
++            if total_cost > self.balance:
++                raise ValueError("Insufficient balance")
++            self.balance -= total_cost
++        else:
++            self.balance += total_cost
++        order = PaperOrder(
++            id=f"paper-{len(self.orders) + 1}",
++            symbol=symbol,
++            side=side,
++            price=filled_price,
++            amount=amount,
++        )
++        self.orders.append(order)
++        logger.info("Paper order executed: %s", order)
++        return order
++
++    def get_balance(self) -> Dict[str, float]:
++        return {"USDT": self.balance}
++
++    def fetch_open_orders(self, symbol: Optional[str] = None) -> List[PaperOrder]:
++        return [order for order in self.orders if order.status == "open" and (symbol is None or order.symbol == symbol)]
++
++    def cancel_order(self, order_id: str) -> None:
++        for order in self.orders:
++            if order.id == order_id:
++                order.status = "canceled"
++                logger.info("Order canceled: %s", order_id)
++                return
++        raise ValueError(f"Order {order_id} not found")
+diff --git a/trading-bot/src/config.py b/trading-bot/src/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..47a0454276dd9d6b7b420930a6b4164da50a52b1
+--- /dev/null
++++ b/trading-bot/src/config.py
+@@ -0,0 +1,81 @@
++from __future__ import annotations
++
++import functools
++from dataclasses import dataclass
++from typing import List
++
++from pydantic_settings import BaseSettings, SettingsConfigDict
++
++
++class Settings(BaseSettings):
++    binance_api_key: str = ""
++    binance_api_secret: str = ""
++    binance_testnet: bool = True
++    base_symbols: List[str] = ["BTC/USDT", "ETH/USDT"]
++    timeframe: str = "1h"
++    risk_per_trade: float = 0.01
++    max_concurrent_positions: int = 3
++    db_url: str = "sqlite:///./data/bot.db"
++    telegram_bot_token: str = ""
++    telegram_chat_id: str = ""
++    allow_toggle: bool = False
++    state_path: str = "./data/state"
++    poll_interval_seconds: int = 60
++    max_daily_loss: float = 0.03
++    max_total_exposure: float = 0.8
++    slippage_bps: int = 5
++    taker_fee_bps: int = 10
++    model_threshold: float = 0.55
++    telegram_daily_report_time: str = "08:00"
++    telegram_weekly_report_time: str = "18:00"
++
++    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
++
++
++@functools.lru_cache(maxsize=1)
++def get_settings() -> Settings:
++    return Settings()
+diff --git a/trading-bot/src/data/__init__.py b/trading-bot/src/data/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/trading-bot/src/data/features.py b/trading-bot/src/data/features.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb680f0ab878bde65aee06a418d467364a0cde25
+--- /dev/null
++++ b/trading-bot/src/data/features.py
+@@ -0,0 +1,95 @@
++from __future__ import annotations
++
++import pandas as pd
++import pandas_ta as ta
++
++
++def add_features(df: pd.DataFrame) -> pd.DataFrame:
++    df = df.copy()
++    df["sma10"] = df["close"].rolling(window=10).mean()
++    df["sma50"] = df["close"].rolling(window=50).mean()
++    df["sma200"] = df["close"].rolling(window=200).mean()
++    df["rsi14"] = ta.rsi(df["close"], length=14)
++    df["atr14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
++    bb = ta.bbands(df["close"], length=20)
++    df["bb_low"] = bb["BBL_20_2.0"]
++    df["bb_mid"] = bb["BBM_20_2.0"]
++    df["bb_high"] = bb["BBU_20_2.0"]
++    df["roc12"] = ta.roc(df["close"], length=12)
++    df["volatility"] = df["close"].rolling(window=20).std()
++    df["label"] = df["close"].shift(-1) / df["close"] - 1.0
++    return df
+diff --git a/trading-bot/src/data/market_data.py b/trading-bot/src/data/market_data.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..972cbde505d98ef7bd65e05b4f23cdb809044bbd
+--- /dev/null
++++ b/trading-bot/src/data/market_data.py
+@@ -0,0 +1,143 @@
++from __future__ import annotations
++
++import logging
++from dataclasses import dataclass
++from typing import Dict, Optional
++
++import pandas as pd
++from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, select
++from sqlalchemy.dialects.sqlite import insert
++
++logger = logging.getLogger(__name__)
++
++
++metadata = MetaData()
++
++candles_table = Table(
++    "candles",
++    metadata,
++    Column("id", Integer, primary_key=True),
++    Column("symbol", String, nullable=False),
++    Column("timeframe", String, nullable=False),
++    Column("timestamp", DateTime, nullable=False),
++    Column("open", Float, nullable=False),
++    Column("high", Float, nullable=False),
++    Column("low", Float, nullable=False),
++    Column("close", Float, nullable=False),
++    Column("volume", Float, nullable=False),
++)
++
++
++@dataclass
++class MarketDataService:
++    engine_url: str
++
++    def __post_init__(self):
++        self.engine = create_engine(self.engine_url)
++        metadata.create_all(self.engine)
++
++    def fetch(self, symbol: str, timeframe: str, since: Optional[int] = None, limit: int = 500) -> pd.DataFrame:
++        with self.engine.begin() as conn:
++            stmt = (
++                select(candles_table)
++                .where(candles_table.c.symbol == symbol)
++                .where(candles_table.c.timeframe == timeframe)
++                .order_by(candles_table.c.timestamp.desc())
++                .limit(limit)
++            )
++            rows = conn.execute(stmt).fetchall()
++        if rows:
++            df = pd.DataFrame(rows, columns=rows[0].keys())
++            df.sort_values("timestamp", inplace=True)
++            return df
++        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
++
++    def store(self, symbol: str, timeframe: str, data) -> None:
++        if not data:
++            return
++        records = []
++        for entry in data:
++            ts, open_, high, low, close, volume = entry
++            records.append(
++                {
++                    "symbol": symbol,
++                    "timeframe": timeframe,
++                    "timestamp": pd.to_datetime(ts, unit="ms"),
++                    "open": float(open_),
++                    "high": float(high),
++                    "low": float(low),
++                    "close": float(close),
++                    "volume": float(volume),
++                }
++            )
++        if not records:
++            return
++        with self.engine.begin() as conn:
++            for record in records:
++                stmt = (
++                    insert(candles_table)
++                    .values(**record)
++                    .on_conflict_do_nothing(index_elements=["symbol", "timeframe", "timestamp"])
++                )
++                conn.execute(stmt)
++
++
++def default_market_data_service(db_url: str) -> MarketDataService:
++    return MarketDataService(engine_url=db_url)
+diff --git a/trading-bot/src/data/news_report.py b/trading-bot/src/data/news_report.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..eaab81a27738b9883569a4af07de006b24028145
+--- /dev/null
++++ b/trading-bot/src/data/news_report.py
+@@ -0,0 +1,65 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import datetime
++from typing import Tuple
++
++import pandas as pd
++import yfinance as yf
++
++
++@dataclass
++class MarketSnapshot:
++    dax_level: float
++    dax_change_pct: float
++    btc_price: float
++    btc_change_pct: float
++    eth_price: float
++    eth_change_pct: float
++
++
++def fetch_market_snapshot() -> MarketSnapshot:
++    symbols = ["^GDAXI", "BTC-USD", "ETH-USD"]
++    data = yf.download(symbols, period="2d", interval="1d", auto_adjust=True, progress=False)
++    latest = data["Close"].iloc[-1]
++    prev = data["Close"].iloc[-2]
++    change = (latest - prev) / prev * 100
++    return MarketSnapshot(
++        dax_level=float(latest["^GDAXI"]),
++        dax_change_pct=float(change["^GDAXI"]),
++        btc_price=float(latest["BTC-USD"]),
++        btc_change_pct=float(change["BTC-USD"]),
++        eth_price=float(latest["ETH-USD"]),
++        eth_change_pct=float(change["ETH-USD"]),
++    )
++
++
++def build_daily_report(equity: float, wtd: float) -> str:
++    snapshot = fetch_market_snapshot()
++    now = datetime.now().strftime("%Y-%m-%d")
++    return (
++        f"[Daily Report {now}] "
++        f"DAX {snapshot.dax_level:.2f} ({snapshot.dax_change_pct:+.2f}%), "
++        f"BTC {snapshot.btc_price:.2f} ({snapshot.btc_change_pct:+.2f}%), "
++        f"ETH {snapshot.eth_price:.2f} ({snapshot.eth_change_pct:+.2f}%), "
++        f"Equity {equity:.2f}, WTD {wtd:+.2f}%"
++    )
++
++
++def build_weekly_report(pnl_pct: float, max_dd: float, top_strategy: str) -> str:
++    now = datetime.now().strftime("%Y-%m-%d")
++    return (
++        f"[Weekly Report {now}] "
++        f"PnL {pnl_pct:+.2f}% | MaxDD {max_dd:.2f}% | Top Strategy {top_strategy}"
++    )
+diff --git a/trading-bot/src/execute/__init__.py b/trading-bot/src/execute/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/trading-bot/src/execute/bot.py b/trading-bot/src/execute/bot.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..352ef2f3a9b6aef9517539eb32537c9360d6a7d5
+--- /dev/null
++++ b/trading-bot/src/execute/bot.py
+@@ -0,0 +1,315 @@
++from __future__ import annotations
++
++import json
++import logging
++import time
++from dataclasses import dataclass
++from datetime import datetime
++from typing import Dict, Optional
++
++import numpy as np
++import pandas as pd
++
++from ..config import get_settings
++from ..data.features import add_features
++from ..data.market_data import MarketDataService, default_market_data_service
++from ..execute.executor import Executor
++from ..execute.notifier import Notifier
++from ..ml.online_model import OnlineModel
++from ..state.store import equity_file, state_dir, status_file, trades_file
++from ..strategy.momentum_rsi import MomentumRSIStrategy
++from ..strategy.position_sizing import position_size
++from ..strategy.risk import RiskManager
++
++logger = logging.getLogger(__name__)
++
++
++@dataclass
++class PositionState:
++    symbol: str
++    entry_price: float
++    size: float
++    atr: float
++    strategy: str
++
++
++class PaperBot:
++    def __init__(self, settings=None):
++        self.settings = settings or get_settings()
++        self.market_data = default_market_data_service(self.settings.db_url)
++        self.executor = Executor(paper=True, settings=self.settings)
++        self.notifier = Notifier(settings=self.settings)
++        self.executor.context.order_callback = self._handle_fill
++        self.strategy = MomentumRSIStrategy()
++        self.risk_manager = RiskManager(settings=self.settings)
++        self.state_path = state_dir()
++        self.positions: Dict[str, PositionState] = {}
++        self.last_processed: Dict[str, pd.Timestamp] = {}
++        self.last_trained: Dict[str, pd.Timestamp] = {}
++        feature_columns = [
++            "sma10",
++            "sma50",
++            "sma200",
++            "rsi14",
++            "atr14",
++            "bb_low",
++            "bb_mid",
++            "bb_high",
++            "roc12",
++            "volatility",
++        ]
++        self.model = OnlineModel(feature_columns)
++
++    def run(self) -> None:
++        logger.info("Starting paper bot in %s mode", "testnet" if self.settings.binance_testnet else "live")
++        while True:
++            start = time.time()
++            for symbol in self.settings.base_symbols:
++                self._process_symbol(symbol)
++            self._write_state()
++            elapsed = time.time() - start
++            sleep_for = max(0, self.settings.poll_interval_seconds - elapsed)
++            logger.debug("Cycle completed in %.2fs, sleeping %.2fs", elapsed, sleep_for)
++            time.sleep(sleep_for)
++
++    def _process_symbol(self, symbol: str) -> None:
++        frame = self._fetch_frame(symbol)
++        if frame is None or frame.empty:
++            logger.warning("No market data for %s", symbol)
++            return
++        frame = add_features(frame)
++        if frame["label"].isna().all():
++            return
++
++        signals = self.strategy.generate_signals(frame)
++        latest_signal = signals.entries.iloc[-1]
++        latest_atr = signals.atr.iloc[-1]
++
++        features = frame.iloc[-2][self.model.feature_columns].to_frame().T
++        label = (frame.iloc[-1]["label"] > 0).astype(int)
++
++        if self.model.is_initialized:
++            proba = self.model.predict_proba(features)[0, 1]
++        else:
++            proba = 1.0
++        allowed = proba >= self.settings.model_threshold
++
++        position = self.positions.get(symbol)
++        if latest_signal == 1 and not position and allowed:
++            size = position_size(
++                self.executor.context.equity,
++                frame.iloc[-1]["close"],
++                latest_atr,
++                self.settings.risk_per_trade,
++                2.0,
++            )
++            if size > 0:
++                self._enter_position(symbol, frame.iloc[-1]["close"], size, latest_atr, self.strategy.name)
++        elif latest_signal == 0 and position:
++            self._exit_position(symbol, frame.iloc[-1]["close"], reason="signal_exit")
++
++        if self.last_trained.get(symbol) != frame.index[-2]:
++            self.model.partial_fit_on_barclose(features, np.array([label]))
++            self.last_trained[symbol] = frame.index[-2]
++
++        self.last_processed[symbol] = frame.index[-1]
++
++    def _fetch_frame(self, symbol: str):
++        try:
++            since = None
++            last_ts = self.last_processed.get(symbol)
++            if last_ts is not None:
++                since = int(last_ts.value // 1_000_000)
++            return self.market_data.fetch(
++                symbol,
++                self.settings.timeframe,
++                limit=500,
++                since=since,
++            )
++        except Exception as exc:  # pragma: no cover - network path
++            logger.error("Failed to fetch market data for %s: %s", symbol, exc)
++            return None
++
++    def _enter_position(self, symbol: str, price: float, size: float, atr: float, strategy: str) -> None:
++        if not self.risk_manager.can_enter(self.positions, size, price):
++            logger.info("Risk manager denied entry for %s", symbol)
++            return
++        order = self.executor.submit_order(symbol, "buy", size, price)
++        if order:
++            self.positions[symbol] = PositionState(symbol, price, size, atr, strategy)
++            self.notifier.notify_trade_open(symbol, strategy, size, price, atr)
++
++    def _exit_position(self, symbol: str, price: float, reason: str) -> None:
++        position = self.positions.get(symbol)
++        if not position:
++            return
++        order = self.executor.submit_order(symbol, "sell", position.size, price)
++        if order:
++            pnl = (price - position.entry_price) * position.size
++            pnl_pct = pnl / max(position.entry_price * position.size, 1e-9) * 100
++            self.notifier.notify_trade_close(symbol, reason, pnl, pnl_pct)
++            del self.positions[symbol]
++
++    def _write_state(self) -> None:
++        status = {
++            "timestamp": datetime.utcnow().isoformat(),
++            "equity": self.executor.context.equity,
++            "open_positions": [
++                {
++                    "symbol": pos.symbol,
++                    "entry_price": pos.entry_price,
++                    "size": pos.size,
++                    "strategy": pos.strategy,
++                    "atr": pos.atr,
++                }
++                for pos in self.positions.values()
++            ],
++        }
++        status_path = status_file()
++        status_path.write_text(json.dumps(status, indent=2))
++
++        if self.equity_curve and pd is not None:
++            equity_path = equity_file()
++            df = pd.DataFrame(self.equity_curve, columns=["timestamp", "equity"])
++            df.to_csv(equity_path, index=False)
++
++    def _handle_fill(self, payload: Dict) -> None:
++        record = dict(payload)
++        record["timestamp"] = datetime.utcnow().isoformat()
++        trades_path = trades_file()
++        with trades_path.open("a", encoding="utf-8") as handle:
++            handle.write(json.dumps(record) + "\n")
++
++    @property
++    def equity_curve(self):
++        return self.executor.context.equity_curve
+diff --git a/trading-bot/src/execute/executor.py b/trading-bot/src/execute/executor.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9503a2e1b64f660e31355750698a15d887a500d
+--- /dev/null
++++ b/trading-bot/src/execute/executor.py
+@@ -0,0 +1,63 @@
++from __future__ import annotations
++
++import logging
++from dataclasses import dataclass, field
++from typing import Callable, Dict, Optional
++
++from ..broker.binance_adapter import BinanceAdapter, estimate_fee
++from ..broker.paper_wallet import PaperWallet
++from ..config import get_settings
++
++logger = logging.getLogger(__name__)
++
++
++@dataclass
++class ExecutionContext:
++    equity: float = 10_000.0
++    equity_curve: list = field(default_factory=list)
++    order_callback: Optional[Callable[[Dict], None]] = None
++
++
++class Executor:
++    def __init__(self, paper: bool, settings=None):
++        self.settings = settings or get_settings()
++        self.paper = paper
++        self.context = ExecutionContext(equity=10_000.0, equity_curve=[])
++        if paper:
++            self.wallet = PaperWallet(initial_balance=self.context.equity, fee_bps=self.settings.taker_fee_bps)
++        else:
++            self.adapter = BinanceAdapter(
++                api_key=self.settings.binance_api_key,
++                api_secret=self.settings.binance_api_secret,
++                use_testnet=self.settings.binance_testnet,
++            )
++
++    def submit_order(self, symbol: str, side: str, amount: float, price: float):
++        if self.paper:
++            order = self.wallet.create_order(symbol, side, amount, price)
++        else:
++            order = self.adapter.create_order(symbol, side, amount, price=price, order_type="limit")
++        fee = estimate_fee(price, amount, self.settings.taker_fee_bps)
++        if side == "buy":
++            self.context.equity -= price * amount + fee
++        else:
++            self.context.equity += price * amount - fee
++        self.context.equity_curve.append((symbol, float(price)))
++        if self.context.order_callback:
++            self.context.order_callback(
++                {
++                    "symbol": symbol,
++                    "side": side,
++                    "price": price,
++                    "amount": amount,
++                    "fee": fee,
++                }
++            )
++        return order
+diff --git a/trading-bot/src/execute/notifier.py b/trading-bot/src/execute/notifier.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6be47ed9e645997f9bde74d9248bfdd1c2b1c850
+--- /dev/null
++++ b/trading-bot/src/execute/notifier.py
+@@ -0,0 +1,47 @@
++from __future__ import annotations
++
++import logging
++import time
++from collections import defaultdict
++
++from python_telegram_bot import Bot  # type: ignore
++
++from ..config import get_settings
++from ..data.news_report import build_daily_report, build_weekly_report
++
++logger = logging.getLogger(__name__)
++
++
++class Notifier:
++    def __init__(self, settings=None):
++        self.settings = settings or get_settings()
++        self.bot = Bot(self.settings.telegram_bot_token) if self.settings.telegram_bot_token else None
++        self.last_sent = defaultdict(float)
++
++    def notify(self, key: str, message: str, min_interval: int = 30) -> None:
++        if not self.bot or not self.settings.telegram_chat_id:
++            logger.debug("Notifier skipped: %s", message)
++            return
++        now = time.time()
++        if now - self.last_sent[key] < min_interval:
++            return
++        self.bot.send_message(chat_id=self.settings.telegram_chat_id, text=message)
++        self.last_sent[key] = now
++
++    def notify_trade_open(self, symbol: str, strategy: str, qty: float, price: float, atr: float) -> None:
++        message = f"[{symbol}] {strategy} BUY qty={qty:.4f} @ {price:.2f} ATR={atr:.2f}"
++        self.notify(f"trade_open_{symbol}", message)
++
++    def notify_trade_close(self, symbol: str, reason: str, pnl_abs: float, pnl_pct: float) -> None:
++        message = f"[{symbol}] {reason}: PnL {pnl_abs:.2f} ({pnl_pct:.2f}%)"
++        self.notify(f"trade_close_{symbol}", message)
++
++    def send_daily_report(self, equity: float, wtd: float) -> None:
++        message = build_daily_report(equity, wtd)
++        self.notify("daily_report", message, min_interval=60)
++
++    def send_weekly_report(self, pnl_pct: float, max_dd: float, top_strategy: str) -> None:
++        message = build_weekly_report(pnl_pct, max_dd, top_strategy)
++        self.notify("weekly_report", message, min_interval=60)
+diff --git a/trading-bot/src/execute/portfolio.py b/trading-bot/src/execute/portfolio.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..201fb7682d5e5efaef7ec86dc8240024cb1f14e0
+--- /dev/null
++++ b/trading-bot/src/execute/portfolio.py
+@@ -0,0 +1,40 @@
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from typing import Dict
++
++
++@dataclass
++class Position:
++    symbol: str
++    size: float
++    entry_price: float
++    atr: float
++    strategy: str
++
++
++@dataclass
++class Portfolio:
++    positions: Dict[str, Position] = field(default_factory=dict)
++
++    def add(self, position: Position) -> None:
++        self.positions[position.symbol] = position
++
++    def remove(self, symbol: str) -> None:
++        self.positions.pop(symbol, None)
++
++    def exposure(self, price_map: Dict[str, float]) -> float:
++        return sum(pos.size * price_map.get(pos.symbol, pos.entry_price) for pos in self.positions.values())
++
++    def count(self) -> int:
++        return len(self.positions)
+diff --git a/trading-bot/src/logging_conf.py b/trading-bot/src/logging_conf.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f10dce5bd27cfbba9fcfb066cf8fc4e7868c61f
+--- /dev/null
++++ b/trading-bot/src/logging_conf.py
+@@ -0,0 +1,34 @@
++from __future__ import annotations
++
++import logging
++
++
++def configure_logging(level: int = logging.INFO) -> None:
++    logging.basicConfig(
++        level=level,
++        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
++    )
+diff --git a/trading-bot/src/main.py b/trading-bot/src/main.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..830b0b690c31cc4d122119a0b0fe55d0ffc0da92
+--- /dev/null
++++ b/trading-bot/src/main.py
+@@ -0,0 +1,179 @@
++from __future__ import annotations
++
++import argparse
++import logging
++import sys
++from datetime import datetime
++from typing import List, Optional
++
++from apscheduler.schedulers.background import BackgroundScheduler
++
++from .backtest.engine is truncated for brevity due to message limits
+
