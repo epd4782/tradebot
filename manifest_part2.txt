@@ -1,0 +1,586 @@
+BEGIN_MANIFEST PART 2/4
+=== trading-bot/.github/workflows/offline-ci.yml ===
+name: Offline CI
+
+on:
+push:
+branches: ["main"]
+pull_request:
+branches: ["main"]
+
+jobs:
+test:
+runs-on: ubuntu-latest
+env:
+USE_OFFLINE_WHEELS: "true"
+steps:
+- uses: actions/checkout@v4
+
+  - name: Set up Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.11"
+
+  - name: Install dependencies
+    run: |
+      python -m pip install --upgrade pip
+      if [ "${USE_OFFLINE_WHEELS}" = "true" ] && [ -d wheelhouse ] && [ "$(ls -A wheelhouse)" ]; then
+        python -m pip install --no-index --find-links=wheelhouse -r requirements.txt
+      else
+        python -m pip install -r requirements.txt
+      fi
+
+  - name: Run offline test harness
+    run: python scripts/offline_tests.py
+=== END ===
+=== trading-bot/.env.example ===
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+BINANCE_TESTNET=true
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+BASE_SYMBOLS=BTC/USDT,ETH/USDT
+TIMEFRAME=1h
+RISK_PER_TRADE=0.01
+MAX_CONCURRENT_POSITIONS=3
+DB_URL=sqlite:///./data/bot.db
+ALLOW_TOGGLE=false
+STATE_PATH=./data/state
+POLL_INTERVAL_SECONDS=60
+MAX_DAILY_LOSS=0.03
+MAX_TOTAL_EXPOSURE=0.8
+SLIPPAGE_BPS=5
+TAKER_FEE_BPS=10
+ML_PROBABILITY_THRESHOLD=0.55
+TELEGRAM_DAILY_REPORT_TIME=08:00
+TELEGRAM_WEEKLY_REPORT_TIME=18:00
+=== END ===
+=== trading-bot/src/init.py ===
+=== END ===
+=== trading-bot/src/api/init.py ===
+=== END ===
+=== trading-bot/src/api/server.py ===
+from future import annotations
+
+from dataclasses import asdict
+from typing import Dict
+
+from fastapi import FastAPI
+
+from ..config import get_settings
+from ..state.store import compute_equity_metrics, load_status
+
+app = FastAPI(title="TradeIt Bot API")
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+return {"status": "ok"}
+
+@app.get("/config")
+def config_view() -> Dict[str, object]:
+settings = get_settings()
+return asdict(settings)
+
+@app.get("/status")
+def status() -> Dict[str, object]:
+settings = get_settings()
+default_mode = "paper" if (settings.binance_testnet or not settings.binance_api_key) else "live"
+payload = load_status(default_mode=default_mode)
+payload.setdefault("mode", default_mode)
+payload.setdefault("paused", False)
+return payload
+
+@app.get("/metrics")
+def metrics() -> Dict[str, float]:
+equity = compute_equity_metrics()
+return {"sharpe": equity.sharpe, "max_drawdown": equity.max_drawdown}
+
+all = ["app"]
+=== END ===
+=== trading-bot/src/backtest/init.py ===
+=== END ===
+=== trading-bot/src/backtest/engine.py ===
+from future import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Iterable
+
+import numpy as np
+import pandas as pd
+from backtesting import Backtest, Strategy
+
+from ..strategy.base import SignalResult
+from ..strategy.ensemble import EnsembleSelector
+from ..strategy.momentum_rsi import MomentumRSIStrategy
+from ..strategy.mean_reversion import MeanReversionStrategy
+from ..strategy.breakout_atr import BreakoutATRStrategy
+from ..strategy.position_sizing import position_size
+
+@dataclass
+class BacktestResult:
+equity_curve: pd.Series
+trades: pd.DataFrame
+stats: Dict[str, float]
+
+class BacktestEngine:
+def init(self, cash: float = 10_000.0, commission: float = 0.001):
+self.cash = cash
+self.commission = commission
+
+def run(self, df: pd.DataFrame, signals: SignalResult, symbol: str) -> BacktestResult:
+    class WrappedStrategy(Strategy):
+        def init(inner_self):
+            inner_self.signal_entries = signals.entries.astype(bool)
+            inner_self.signal_exits = signals.exits.astype(bool)
+
+        def next(inner_self):
+            if inner_self.signal_entries.iloc[-1] and not inner_self.position:
+                size = position_size(
+                    inner_self.equity,
+                    inner_self.data.Close[-1],
+                    max(inner_self.data.Close[-1] * 0.01, 1e-6),
+                    risk_per_trade=0.01,
+                    stop_atr_mult=2.0,
+                )
+                if size > 0:
+                    inner_self.buy(size=size)
+            elif inner_self.signal_exits.iloc[-1] and inner_self.position:
+                inner_self.position.close()
+
+    bt = Backtest(
+        df,
+        WrappedStrategy,
+        cash=self.cash,
+        commission=self.commission,
+        trade_on_close=True,
+    )
+    stats = bt.run()
+    equity_curve = stats["_equity_curve"]["Equity"]
+    trades = stats["_trades"].copy()
+    return BacktestResult(
+        equity_curve=equity_curve,
+        trades=trades,
+        stats={
+            "Equity Final": float(stats["Equity Final [$]"]),
+            "CAGR": float(stats.get("Return (Ann.)", 0.0)),
+            "Sharpe": float(stats.get("Sharpe Ratio", 0.0)),
+            "Win Rate": float(stats.get("Win Rate [%]", 0.0)),
+        },
+    )
+def prepare_strategies() -> Dict[str, object]:
+return {
+"momentum_rsi": MomentumRSIStrategy(),
+"mean_reversion": MeanReversionStrategy(),
+"breakout_atr": BreakoutATRStrategy(),
+}
+
+def ensemble_select(signals: Dict[str, SignalResult]) -> SignalResult:
+selector = EnsembleSelector()
+return selector.blend_signals(signals)
+=== END ===
+=== trading-bot/src/backtest/metrics.py ===
+from future import annotations
+
+from dataclasses import dataclass
+from typing import Dict
+
+import numpy as np
+import pandas as pd
+
+@dataclass
+class PerformanceMetrics:
+cagr: float
+sharpe: float
+sortino: float
+max_drawdown: float
+win_rate: float
+profit_factor: float
+
+def compute_metrics(equity_curve: pd.Series, trades: pd.DataFrame) -> PerformanceMetrics:
+returns = equity_curve.pct_change().dropna()
+cagr = (equity_curve.iloc[-1] / equity_curve.iloc[0]) ** (365 / len(equity_curve)) - 1
+sharpe = returns.mean() / (returns.std() + 1e-9) * (len(returns) ** 0.5)
+downside = returns[returns < 0]
+sortino = returns.mean() / (downside.std() + 1e-9) * (len(returns) ** 0.5)
+running_max = equity_curve.cummax()
+max_drawdown = ((equity_curve / running_max) - 1).min()
+wins = trades[trades["PnL"] > 0]
+win_rate = len(wins) / max(len(trades), 1)
+gross_profit = trades[trades["PnL"] > 0]["PnL"].sum()
+gross_loss = trades[trades["PnL"] < 0]["PnL"].abs().sum()
+profit_factor = gross_profit / max(gross_loss, 1e-9)
+return PerformanceMetrics(
+cagr=float(cagr),
+sharpe=float(sharpe),
+sortino=float(sortino),
+max_drawdown=float(max_drawdown),
+win_rate=float(win_rate),
+profit_factor=float(profit_factor),
+)
+
+def format_metrics(metrics: PerformanceMetrics) -> Dict[str, float]:
+return {
+"CAGR": metrics.cagr,
+"Sharpe": metrics.sharpe,
+"Sortino": metrics.sortino,
+"Max Drawdown": metrics.max_drawdown,
+"Win Rate": metrics.win_rate,
+"Profit Factor": metrics.profit_factor,
+}
+=== END ===
+=== trading-bot/src/broker/init.py ===
+=== END ===
+=== trading-bot/src/broker/binance_adapter.py ===
+from future import annotations
+
+import logging
+import uuid
+from dataclasses import dataclass
+from typing import Dict, Optional
+
+import ccxt
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from ..config import get_settings
+
+logger = logging.getLogger(name)
+
+@dataclass
+class OrderResponse:
+id: str
+status: str
+symbol: str
+side: str
+price: float
+amount: float
+
+def _client() -> ccxt.binance:
+settings = get_settings()
+exchange = ccxt.binance(
+{
+"apiKey": settings.binance_api_key,
+"secret": settings.binance_api_secret,
+"enableRateLimit": True,
+"options": {"defaultType": "spot"},
+"timeout": 20000,
+}
+)
+if settings.binance_testnet:
+exchange.set_sandbox_mode(True)
+exchange.load_markets()
+return exchange
+
+def _round(exchange: ccxt.binance, symbol: str, amount: float, price: Optional[float]):
+rounded_amount = float(exchange.amount_to_precision(symbol, amount))
+rounded_price = float(exchange.price_to_precision(symbol, price)) if price is not None else None
+return rounded_amount, rounded_price
+
+def _order_id() -> str:
+return f"bot-{uuid.uuid4().hex[:16]}"
+
+class BinanceAdapter:
+def init(self, settings=None):
+self.settings = settings or get_settings()
+self.exchange = _client()
+
+@retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
+def get_balance(self) -> Dict[str, float]:
+    balance = self.exchange.fetch_balance()
+    return {k: float(v["free"]) for k, v in balance.get("free", {}).items()}
+
+@retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
+def fetch_ohlcv(self, symbol: str, timeframe: str, since: Optional[int] = None, limit: int = 500):
+    return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+
+@retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
+def create_order(
+    self,
+    symbol: str,
+    side: str,
+    amount: float,
+    price: Optional[float] = None,
+    order_type: str = "limit",
+) -> Dict:
+    rounded_amount, rounded_price = _round(self.exchange, symbol, amount, price)
+    logger.info(
+        "Creating order %s %s amount=%s→%s price=%s→%s",
+        side,
+        symbol,
+        amount,
+        rounded_amount,
+        price,
+        rounded_price,
+    )
+    order = self.exchange.create_order(
+        symbol,
+        order_type,
+        side,
+        rounded_amount,
+        rounded_price,
+        params={"newClientOrderId": _order_id()},
+    )
+    return order
+all = ["BinanceAdapter", "OrderResponse"]
+=== END ===
+=== trading-bot/src/broker/paper_wallet.py ===
+from future import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Dict, List
+
+logger = logging.getLogger(name)
+
+@dataclass
+class Fill:
+price: float
+fee: float
+
+class PaperWallet:
+def init(self, balance: Dict[str, float]):
+self.balance = balance.copy()
+self.equity_history: List[tuple[str, float]] = []
+
+def execute(self, symbol: str, side: str, quantity: float, price: float) -> Fill:
+    base = symbol.split("/")[0]
+    quote = symbol.split("/")[1]
+    notional = quantity * price
+    fee = notional * 0.001
+    if side.lower() == "buy":
+        if self.balance.get(quote, 0.0) < notional + fee:
+            raise ValueError("Insufficient balance")
+        self.balance[quote] = self.balance.get(quote, 0.0) - notional - fee
+        self.balance[base] = self.balance.get(base, 0.0) + quantity
+    else:
+        if self.balance.get(base, 0.0) < quantity:
+            raise ValueError("Insufficient balance")
+        self.balance[base] = self.balance.get(base, 0.0) - quantity
+        self.balance[quote] = self.balance.get(quote, 0.0) + notional - fee
+    total = sum(self.balance.values())
+    self.equity_history.append(("UTC", total))
+    return Fill(price=price, fee=fee)
+
+def total_value(self, prices: Dict[str, float] | None = None) -> float:
+    if not prices:
+        return sum(self.balance.values())
+    total = 0.0
+    for asset, qty in self.balance.items():
+        total += qty * prices.get(asset, 1.0)
+    return total
+all = ["PaperWallet", "Fill"]
+=== END ===
+=== trading-bot/src/config.py ===
+from future import annotations
+
+import functools
+from dataclasses import dataclass
+from typing import List
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+binance_api_key: str = ""
+binance_api_secret: str = ""
+binance_testnet: bool = True
+base_symbols: List[str] = ["BTC/USDT", "ETH/USDT"]
+timeframe: str = "1h"
+risk_per_trade: float = 0.01
+max_concurrent_positions: int = 3
+max_total_exposure: float = 0.8
+max_daily_loss: float = 0.03
+db_url: str = "sqlite:///./data/bot.db"
+telegram_bot_token: str = ""
+telegram_chat_id: str = ""
+allow_toggle: bool = False
+state_path: str = "./data/state"
+poll_interval_seconds: int = 60
+slippage_bps: int = 5
+taker_fee_bps: int = 10
+ml_probability_threshold: float = 0.55
+telegram_daily_report_time: str = "08:00"
+telegram_weekly_report_time: str = "18:00"
+
+model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+def symbols_list(self) -> List[str]:
+    return [s.strip() for s in self.base_symbols]
+@functools.lru_cache(maxsize=1)
+def get_settings() -> Settings:
+return Settings()
+=== END ===
+=== trading-bot/src/data/init.py ===
+=== END ===
+=== trading-bot/src/data/features.py ===
+from future import annotations
+
+try:
+import pandas as pd
+except ImportError: # pragma: no cover
+pd = None # type: ignore
+try:
+import pandas_ta as ta
+except ImportError: # pragma: no cover
+ta = None # type: ignore
+
+def compute_features(df: pd.DataFrame) -> pd.DataFrame:
+if pd is None or ta is None:
+raise ImportError("pandas and pandas_ta are required for feature computation")
+feats = pd.DataFrame(index=df.index)
+feats["sma_10"] = df["close"].rolling(window=10, min_periods=10).mean()
+feats["sma_50"] = df["close"].rolling(window=50, min_periods=50).mean()
+feats["sma_200"] = df["close"].rolling(window=200, min_periods=200).mean()
+feats["rsi"] = ta.rsi(df["close"], length=14)
+feats["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+bands = ta.bbands(df["close"], length=20)
+feats["bollinger_low"] = bands["BBL_20_2.0"]
+feats["bollinger_mid"] = bands["BBM_20_2.0"]
+feats["bollinger_high"] = bands["BBU_20_2.0"]
+feats["roc"] = ta.roc(df["close"], length=12)
+feats["volatility"] = df["close"].rolling(window=20, min_periods=20).std()
+return feats
+
+def make_feature_label(df: pd.DataFrame):
+feats = compute_features(df)
+forward_return = df["close"].shift(-1) / df["close"] - 1.0
+label = (forward_return > 0).astype(int)
+aligned = feats.iloc[:-1]
+label = label.iloc[:-1]
+return aligned, label
+
+all = ["compute_features", "make_feature_label"]
+=== END ===
+=== trading-bot/src/data/market_data.py ===
+from future import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+import pandas as pd
+from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, select
+from sqlalchemy.dialects.sqlite import insert
+
+from ..config import get_settings
+
+logger = logging.getLogger(name)
+
+metadata = MetaData()
+
+candles = Table(
+"candles",
+metadata,
+Column("id", Integer, primary_key=True),
+Column("symbol", String, nullable=False),
+Column("timeframe", String, nullable=False),
+Column("timestamp", DateTime, nullable=False),
+Column("open", Float, nullable=False),
+Column("high", Float, nullable=False),
+Column("low", Float, nullable=False),
+Column("close", Float, nullable=False),
+Column("volume", Float, nullable=False),
+)
+
+@dataclass
+class MarketDataService:
+engine_url: str
+
+def __post_init__(self):
+    self.engine = create_engine(self.engine_url, future=True)
+    metadata.create_all(self.engine)
+
+def fetch(self, symbol: str, timeframe: str, since: Optional[int] = None, limit: int = 500) -> pd.DataFrame:
+    with self.engine.begin() as conn:
+        stmt = (
+            select(candles)
+            .where(candles.c.symbol == symbol)
+            .where(candles.c.timeframe == timeframe)
+            .order_by(candles.c.timestamp.desc())
+            .limit(limit)
+        )
+        rows = conn.execute(stmt).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    df = pd.DataFrame(rows, columns=rows[0].keys())
+    df.sort_values("timestamp", inplace=True)
+    df.set_index("timestamp", inplace=True)
+    return df
+
+def store(self, symbol: str, timeframe: str, data) -> None:
+    if not data:
+        return
+    records = []
+    for entry in data:
+        ts, open_, high, low, close, volume = entry
+        records.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timestamp": pd.to_datetime(ts, unit="ms"),
+                "open": float(open_),
+                "high": float(high),
+                "low": float(low),
+                "close": float(close),
+                "volume": float(volume),
+            }
+        )
+    if not records:
+        return
+    with self.engine.begin() as conn:
+        for record in records:
+            stmt = (
+                insert(candles)
+                .values(**record)
+                .on_conflict_do_nothing(index_elements=["symbol", "timeframe", "timestamp"])
+            )
+            conn.execute(stmt)
+def default_market_data_service() -> MarketDataService:
+settings = get_settings()
+return MarketDataService(engine_url=settings.db_url)
+=== END ===
+=== trading-bot/src/data/news_report.py ===
+from future import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+import yfinance as yf
+
+@dataclass
+class MarketSnapshot:
+dax_level: float
+dax_change_pct: float
+btc_price: float
+btc_change_pct: float
+eth_price: float
+eth_change_pct: float
+
+def fetch_market_snapshot() -> MarketSnapshot:
+tickers = ["^GDAXI", "BTC-USD", "ETH-USD"]
+data = yf.download(tickers, period="2d", interval="1d", progress=False, auto_adjust=True)
+latest = data["Close"].iloc[-1]
+prev = data["Close"].iloc[-2]
+change = (latest - prev) / prev * 100.0
+return MarketSnapshot(
+dax_level=float(latest["^GDAXI"]),
+dax_change_pct=float(change["^GDAXI"]),
+btc_price=float(latest["BTC-USD"]),
+btc_change_pct=float(change["BTC-USD"]),
+eth_price=float(latest["ETH-USD"]),
+eth_change_pct=float(change["ETH-USD"]),
+)
+
+def build_daily_report(equity: float, wtd: float) -> str:
+snap = fetch_market_snapshot()
+now = datetime.now().strftime("%Y-%m-%d")
+return (
+f"[Daily Report {now}] DAX {snap.dax_level:.2f} ({snap.dax_change_pct:+.2f}%), "
+f"BTC {snap.btc_price:.2f} ({snap.btc_change_pct:+.2f}%), "
+f"ETH {snap.eth_price:.2f} ({snap.eth_change_pct:+.2f}%), "
+f"Equity {equity:.2f}, WTD {wtd:+.2f}%"
+)
+
+def build_weekly_report(pnl_pct: float, max_dd: float, top_strategy: str) -> str:
+now = datetime.now().strftime("%Y-%m-%d")
+return f"[Weekly Report {now}] Woche: PnL {pnl_pct:+.2f}% | MaxDD {max_dd:.2f}% | TopStrat {top_strategy}"
+=== END ===
+END_MANIFEST
