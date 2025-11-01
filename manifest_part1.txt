@@ -1,0 +1,330 @@
+BEGIN_MANIFEST PART 1/4
+=== trading-bot/requirements.txt ===
+ccxt>=4.3.0
+pandas>=2.1
+numpy>=1.26
+scipy>=1.11
+pandas_ta>=0.3.14b
+backtesting>=0.3.3
+scikit-learn>=1.4
+joblib>=1.3
+fastapi>=0.110
+uvicorn[standard]>=0.29
+streamlit>=1.34
+python-telegram-bot>=20.8
+yfinance>=0.2
+SQLAlchemy>=2.0
+pydantic-settings>=2.2
+alembic>=1.13
+pytest>=8.1
+python-dotenv>=1.0
+loguru>=0.7
+pendulum>=3.0
+matplotlib>=3.8
+tenacity>=8.2
+APScheduler>=3.10
+=== END ===
+=== trading-bot/docker-compose.yml ===
+version: '3.9'
+services:
+bot:
+build: .
+env_file:
+- .env
+volumes:
+- ./data:/app/data
+command: ["python", "-m", "src.main", "paper"]
+restart: unless-stopped
+
+api:
+build: .
+env_file:
+- .env
+volumes:
+- ./data:/app/data
+command: ["python", "-m", "src.main", "api"]
+ports:
+- "8000:8000"
+depends_on:
+- bot
+restart: unless-stopped
+
+ui:
+build: .
+env_file:
+- .env
+volumes:
+- ./data:/app/data
+command: ["python", "-m", "src.main", "ui"]
+ports:
+- "8501:8501"
+depends_on:
+- api
+restart: unless-stopped
+=== END ===
+=== trading-bot/Dockerfile ===
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+ARG USE_OFFLINE_WHEELS=false
+ENV USE_OFFLINE_WHEELS=${USE_OFFLINE_WHEELS}
+
+COPY requirements.txt ./
+COPY wheelhouse ./wheelhouse
+
+RUN if [ "${USE_OFFLINE_WHEELS}" = "true" ]; then
+if [ -d wheelhouse ] && [ "$(ls -A wheelhouse)" ]; then
+pip install --no-cache-dir --no-index --find-links=wheelhouse -r requirements.txt;
+else
+echo "Offline installation requested but wheelhouse is empty" >&2;
+exit 1;
+fi;
+else
+pip install --no-cache-dir -r requirements.txt;
+fi
+
+COPY . .
+
+CMD ["python", "-m", "src.main", "paper"]
+=== END ===
+=== trading-bot/README.md ===
+
+TradeIt Binance Trading Bot
+Ein leichtgewichtiges, produktionsnahes Projekt für einen modularen Spot-Krypto-Trading-Bot auf Binance.
+
+Features
+Broker-Adapter für Binance (ccxt) mit Paper-Wallet-Fallback
+
+Datenmodul mit SQLite-Caching, Feature Engineering und Markt-/News-Reports
+
+Mehrere Strategien (Momentum RSI, Mean Reversion, Breakout ATR) sowie Ensemble-Auswahl
+
+Risk- und Positions-Management mit ATR-basierten Stops und Exposure-Limits
+
+Backtesting-Engine mit Kennzahlen, Walk-Forward-Updates und CLI-Steuerung
+
+Online lernendes ML-Modul mit SGDClassifier
+
+Telegram-Alerts, FastAPI Status-API und Streamlit Dashboard
+
+Docker Compose Setup für Bot, API und UI
+
+Setup
+Python 3.11 installieren
+
+Repository klonen und in das Projekt wechseln:
+
+git clone <repo-url>
+cd trading-bot
+Virtuelle Umgebung erstellen und Abhängigkeiten installieren:
+
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+.env anhand von .env.example anpassen oder die bereitgestellte .env für Testnet/Paper verwenden. Die wichtigsten Variablen:
+
+DB_URL=sqlite:///./data/bot.db – persistente SQLite-Datenbank im gemounteten data/-Verzeichnis
+
+STATE_PATH=./data/state – Status- und Equity-Dateien für API/UI
+
+POLL_INTERVAL_SECONDS=60 – Abfrageintervall des Paper-Bots
+
+Offline Wheelhouse & CI
+Lege vor dem ersten CI-Lauf alle benötigten Wheels in wheelhouse/ ab (pip download -r requirements.txt -d wheelhouse).
+
+Die GitHub Actions Workflow-Datei offline-ci.yml installiert ausschließlich aus diesem Verzeichnis. Ist es leer, führt sie das Offline-Test-Harness scripts/offline_tests.py ohne zusätzliche Pakete aus, sodass der Build nicht am Proxy scheitert.
+
+Optional können weitere Wheels (z. B. interne Builds) ergänzt werden, ohne Anpassungen am Workflow vornehmen zu müssen.
+
+CLI Beispiele
+python -m src.main backtest --symbols BTC/USDT,ETH/USDT --timeframe 1h --start 2023-01-01 --end 2024-01-01 --strategy ensemble
+python -m src.main paper
+python -m src.main live
+python -m src.main report --daily
+python -m src.main ui
+Docker
+docker compose up -d --build
+Dies startet Bot (Paper-Modus), FastAPI und das Streamlit Dashboard. Für vollständig offline Builds setze beim Image-Build das Argument --build-arg USE_OFFLINE_WHEELS=true, nachdem die benötigten Wheels in wheelhouse/ abgelegt wurden.
+
+Alle Services teilen sich das lokale ./data-Verzeichnis (gemountet nach /app/data). Darin befinden sich u. a.:
+
+data/bot.db – SQLite Cache/Trades
+
+data/state/status.json – aktueller Bot-Status
+
+data/state/equity.csv – Equity-Verlauf für API/UI
+
+data/state/trades.jsonl – Trade-Log (JSON Lines)
+
+Paper-Mode Deployment (Docker Compose)
+.env mit Paper/Testnet-Keys ausstatten (Standardwerte vorhanden).
+
+Wheels in wheelhouse/ kopieren, falls kein Internetzugang verfügbar ist.
+
+Container-Stack starten:
+
+docker compose up -d --build
+Streamlit UI unter http://localhost:8501, FastAPI unter http://localhost:8000 aufrufen.
+
+Sicherheit
+Bewahre API-Keys sicher in der .env auf.
+
+Handle Limits konservativ und überwache die Positionsgröße.
+
+Backtests sind keine Garantie für zukünftige Erträge.
+=== END ===
+=== trading-bot/data/.gitignore ===
+
+!.gitignore
+!.gitkeep
+=== END ===
+=== trading-bot/scripts/offline_tests.py ===
+from future import annotations
+
+import importlib
+import importlib.util
+import inspect
+import os
+import shutil
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Callable, Dict, Tuple
+
+TEST_ROOT = Path(file).resolve().parents[1] / "tests"
+SRC_ROOT = Path(file).resolve().parents[1] / "src"
+if str(SRC_ROOT) not in sys.path:
+sys.path.insert(0, str(SRC_ROOT))
+
+class SkipTest(Exception):
+"""Raised to indicate a skipped test or module."""
+
+class MonkeyPatch:
+def init(self) -> None:
+self._env_changes: list[Tuple[str, str | None]] = []
+self._attr_changes: list[Tuple[Any, str, Any, bool]] = []
+
+def setenv(self, name: str, value: Any) -> None:
+    old = os.environ.get(name)
+    os.environ[name] = str(value)
+    self._env_changes.append((name, old))
+
+def delenv(self, name: str, raising: bool = True) -> None:
+    if name in os.environ:
+        old = os.environ.pop(name)
+        self._env_changes.append((name, old))
+    elif raising:
+        raise KeyError(name)
+    else:
+        self._env_changes.append((name, None))
+
+def setattr(self, target: Any, name: str, value: Any) -> None:
+    existed = hasattr(target, name)
+    old = getattr(target, name, None)
+    setattr(target, name, value)
+    self._attr_changes.append((target, name, old, existed))
+
+def undo(self) -> None:
+    while self._env_changes:
+        name, old = self._env_changes.pop()
+        if old is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old
+    while self._attr_changes:
+        target, name, old, existed = self._attr_changes.pop()
+        if existed:
+            setattr(target, name, old)
+        else:
+            delattr(target, name)
+def importorskip(module_name: str) -> ModuleType:
+try:
+return importlib.import_module(module_name)
+except Exception as exc: # pragma: no cover - dependency missing
+raise SkipTest(f"missing optional dependency: {module_name}") from exc
+
+pytest_stub = ModuleType("pytest")
+pytest_stub.importorskip = importorskip # type: ignore[attr-defined]
+pytest_stub.SkipTest = SkipTest # type: ignore[attr-defined]
+sys.modules.setdefault("pytest", pytest_stub)
+
+def _load_module(path: Path) -> ModuleType:
+spec = importlib.util.spec_from_file_location(path.stem, path)
+if spec is None or spec.loader is None:
+raise ImportError(f"Cannot load module from {path}")
+module = importlib.util.module_from_spec(spec)
+try:
+spec.loader.exec_module(module)
+except SkipTest:
+raise
+return module
+
+def _build_fixtures(func: Callable[..., Any]) -> Tuple[Dict[str, Any], list[Tuple[str, Any]]]:
+fixtures: Dict[str, Any] = {}
+cleanup: list[Tuple[str, Any]] = []
+signature = inspect.signature(func)
+for name in signature.parameters:
+if name == "tmp_path":
+tmp_dir = Path(tempfile.mkdtemp())
+fixtures[name] = tmp_dir
+cleanup.append((name, tmp_dir))
+elif name == "monkeypatch":
+fixtures[name] = MonkeyPatch()
+cleanup.append((name, fixtures[name]))
+else:
+raise TypeError(f"Unsupported fixture '{name}' in {func.name}")
+return fixtures, cleanup
+
+def _cleanup_fixtures(cleanup: list[Tuple[str, Any]]) -> None:
+for name, value in reversed(cleanup):
+if name == "tmp_path":
+shutil.rmtree(value, ignore_errors=True)
+elif name == "monkeypatch":
+value.undo()
+
+def run() -> int:
+passed = skipped = failed = 0
+for test_file in sorted(TEST_ROOT.glob("test_*.py")):
+try:
+module = _load_module(test_file)
+except SkipTest as exc:
+skipped += 1
+print(f"SKIPPED {test_file.name}: {exc}")
+continue
+except Exception as exc: # pragma: no cover - import errors
+failed += 1
+print(f"ERROR importing {test_file.name}: {exc}")
+traceback.print_exc()
+continue
+
+    members = inspect.getmembers(module, inspect.isfunction)
+    test_functions = [func for name, func in members if name.startswith("test_")]
+    for func in test_functions:
+        fixtures, cleanup = _build_fixtures(func)
+        try:
+            func(**fixtures)
+        except SkipTest as exc:
+            skipped += 1
+            print(f"SKIPPED {func.__name__}: {exc}")
+        except AssertionError as exc:
+            failed += 1
+            print(f"FAILED {func.__name__}: {exc}")
+        except Exception as exc:  # pragma: no cover - unexpected failure
+            failed += 1
+            print(f"ERROR {func.__name__}: {exc}")
+            traceback.print_exc()
+        else:
+            passed += 1
+        finally:
+            _cleanup_fixtures(cleanup)
+
+print(f"Summary: {passed} passed, {failed} failed, {skipped} skipped")
+return 0 if failed == 0 else 1
+if name == "main":
+sys.exit(run())
+=== END ===
+END_MANIFEST

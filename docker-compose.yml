@@ -1,7 +1,36 @@
-﻿version: "3.9"
+﻿version: '3.9'
 services:
-  bot:
-    build: .
-    command: ["python","-m","http.server","8000"]
-    ports:
-      - "8000:8000"
+bot:
+build: .
+env_file:
+- .env
+volumes:
+- ./data:/app/data
+command: ["python", "-m", "src.main", "paper"]
+restart: unless-stopped
+
+api:
+build: .
+env_file:
+- .env
+volumes:
+- ./data:/app/data
+command: ["python", "-m", "src.main", "api"]
+ports:
+- "8000:8000"
+depends_on:
+- bot
+restart: unless-stopped
+
+ui:
+build: .
+env_file:
+- .env
+volumes:
+- ./data:/app/data
+command: ["python", "-m", "src.main", "ui"]
+ports:
+- "8501:8501"
+depends_on:
+- api
+restart: unless-stopped
