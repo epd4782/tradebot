@@ -2,13 +2,13 @@
 
 def position_size(
 equity: float,
-entry_price: float,
+entry_px: float,
 atr: float,
 risk_per_trade: float,
 stop_atr_mult: float,
 ) -> float:
 """Berechnet StÃ¼ckzahl so, dass ATR*mult Verlust ~ risk_per_trade * equity entspricht."""
-if equity <= 0 or entry_price <= 0 or atr <= 0:
+if equity <= 0 or entry_px <= 0 or atr <= 0:
 return 0.0
 risk_amount = equity * risk_per_trade
 stop_distance = atr * stop_atr_mult
