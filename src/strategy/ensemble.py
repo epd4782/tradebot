@@ -1,8 +1,6 @@
-﻿from __future__ import annotations
-
-import logging
+﻿import logging
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, List, Sequence, Tuple
 
 try:
 import pandas as pd

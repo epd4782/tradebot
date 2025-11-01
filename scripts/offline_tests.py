@@ -141,5 +141,5 @@ continue
 
 print(f"Summary: {passed} passed, {failed} failed, {skipped} skipped")
 return 0 if failed == 0 else 1
-if name == "main":
+if __name__ == "__main__":
 sys.exit(run())

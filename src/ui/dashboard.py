@@ -60,7 +60,7 @@ if settings.allow_toggle:
         st.toast("Start command sent")
     if col2.button("Stop"):
         st.toast("Stop command sent")
-if name == "main":
+if __name__ == "__main__":
 run_dashboard()
 
 all = ["run_dashboard"]

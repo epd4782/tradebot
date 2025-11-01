@@ -1,0 +1,1236 @@
+BEGIN_MANIFEST PART 3/4
+=== trading-bot/src/execute/init.py ===
+
+=== END ===
+=== trading-bot/src/execute/bot.py ===
+from future import annotations
+
+import json
+import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, Optional
+
+try: # pragma: no cover - optional heavy deps
+import pandas as pd
+except ImportError: # pragma: no cover
+pd = None # type: ignore
+
+from ..config import Settings, get_settings
+from ..data.features import compute_features, make_feature_label
+from ..data.market_data import MarketDataService, default_market_data_service
+from ..execute.executor import Executor
+from ..execute.notifier import Notifier
+from ..ml.online_model import OnlineModel
+from ..state.store import equity_file, state_dir, status_file, trades_file
+from ..strategy.momentum_rsi import MomentumRSIStrategy
+from ..strategy.position_sizing import position_size
+from ..strategy.risk import RiskManager
+
+logger = logging.getLogger(name)
+
+@dataclass
+class PositionState:
+symbol: str
+quantity: float
+entry_price: float
+
+class PaperBot:
+"""Simple bar-close driven paper trading loop for Docker deployments."""
+
+def __init__(
+    self,
+    settings: Optional[Settings] = None,
+    market_data: Optional[MarketDataService] = None,
+    executor: Optional[Executor] = None,
+    notifier: Optional[Notifier] = None,
+) -> None:
+    if pd is None:
+        raise ImportError("pandas is required for paper trading mode")
+    self.settings = settings or get_settings()
+    self.market_data = market_data or default_market_data_service()
+    self.notifier = notifier or Notifier(settings=self.settings)
+    self.executor = executor or Executor(settings=self.settings)
+    self.executor.context.order_callback = self._handle_fill
+    self.strategy = MomentumRSIStrategy()
+    self.risk_manager = RiskManager(settings=self.settings)
+    self.state_path = state_dir()
+    self.positions: Dict[str, PositionState] = {}
+    self.last_processed: Dict[str, pd.Timestamp] = {}
+    self.last_trained: Dict[str, pd.Timestamp] = {}
+    self.last_prices: Dict[str, float] = {}
+    self.equity_curve: list[tuple[datetime, float]] = []
+    self.paused = False
+    self.poll_interval = max(int(self.settings.poll_interval_seconds), 10)
+    self.model_features = [
+        "sma_10",
+        "sma_50",
+        "sma_200",
+        "rsi",
+        "atr",
+        "roc",
+        "volatility",
+    ]
+    self.wallet = self.executor.context.wallet
+    self.model = self._initialise_model()
+
+def _initialise_model(self) -> Optional[OnlineModel]:
+    try:
+        return OnlineModel(
+            feature_cols=self.model_features,
+            probability_threshold=self.settings.ml_probability_threshold,
+        )
+    except Exception as exc:  # pragma: no cover - optional dependency path
+        logger.warning("Online model unavailable: %s", exc)
+        return None
+
+def run_forever(self) -> None:
+    logger.info("Starting paper trading loop for symbols: %s", self.settings.symbols_list())
+    while True:
+        try:
+            self.run_once()
+        except Exception as exc:  # pragma: no cover - resilience
+            logger.exception("Paper trading iteration failed: %s", exc)
+            time.sleep(self.poll_interval)
+        else:
+            time.sleep(self.poll_interval)
+
+def run_once(self) -> None:
+    # refresh equity snapshot before processing new bars
+    self._record_equity_snapshot()
+    self._update_risk_pause()
+
+    for symbol in self.settings.symbols_list():
+        df = self._fetch_frame(symbol)
+        if df is None or df.empty:
+            continue
+        last_ts = df.index[-1]
+        if self.last_processed.get(symbol) == last_ts:
+            # nothing new; update price cache and continue
+            self.last_prices[symbol] = float(df["close"].iloc[-1])
+            continue
+
+        self.last_processed[symbol] = last_ts
+        self.last_prices[symbol] = float(df["close"].iloc[-1])
+
+        try:
+            features = compute_features(df)
+        except Exception as exc:
+            logger.error("Feature computation failed for %s: %s", symbol, exc)
+            continue
+        atr_series = features["atr"].fillna(0.0)
+        atr = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
+        try:
+            signals = self.strategy.generate_signals(df)
+        except Exception as exc:
+            logger.error("Signal generation failed for %s: %s", symbol, exc)
+            continue
+        entry_signal = bool(signals.entries.iloc[-1])
+        exit_signal = bool(signals.exits.iloc[-1])
+
+        price = float(df["close"].iloc[-1])
+
+        self._update_model(symbol, df)
+        probability = self._latest_probability(features)
+
+        if symbol in self.positions and exit_signal:
+            self._exit_position(symbol, price)
+
+        if self.paused:
+            continue
+
+        if entry_signal and symbol not in self.positions:
+            if self.model and not self.model.should_enter(probability):
+                logger.debug("ML gate blocked entry for %s (p=%.3f)", symbol, probability)
+                continue
+            self._enter_position(symbol, price, atr)
+
+    # persist state after processing all symbols
+    self._record_equity_snapshot()
+    self._persist_state()
+
+def _fetch_frame(self, symbol: str):
+    try:
+        since = None
+        last_ts = self.last_processed.get(symbol)
+        if last_ts is not None:
+            since = int(last_ts.value // 1_000_000)
+        return self.market_data.fetch(
+            symbol,
+            self.settings.timeframe,
+            limit=500,
+            since=since,
+        )
+    except Exception as exc:  # pragma: no cover - network path
+        logger.error("Failed to fetch market data for %s: %s", symbol, exc)
+        return None
+
+def _update_model(self, symbol: str, df) -> None:
+    if self.model is None:
+        return
+    features, labels = make_feature_label(df)
+    if features.empty:
+        return
+    current_bar = df.index[-1]
+    if symbol in self.last_trained:
+        features = features.loc[features.index > self.last_trained[symbol]]
+    features = features.loc[features.index < current_bar]
+    if features.empty:
+        return
+    y = labels.loc[features.index].to_numpy()
+    self.model.partial_fit_on_barclose(features, y)
+    self.last_trained[symbol] = features.index[-1]
+
+def _latest_probability(self, features) -> float:
+    if self.model is None:
+        return 1.0
+    try:
+        sample = features.tail(1)[self.model.feature_cols]
+        proba = self.model.predict_proba(sample)[0, 1]
+        return float(proba)
+    except Exception as exc:  # pragma: no cover - model edge cases
+        logger.debug("Probability prediction failed: %s", exc)
+        return 1.0
+
+def _enter_position(self, symbol: str, price: float, atr: float) -> None:
+    equity = self._current_equity()
+    quantity = position_size(
+        equity=equity,
+        entry_px=price,
+        atr=atr,
+        risk_per_trade=self.settings.risk_per_trade,
+    )
+    if quantity <= 0:
+        logger.debug("Position size zero for %s; skipping", symbol)
+        return
+    if not self._risk_allows_entry(quantity, price):
+        logger.info("Risk limits prevented entry for %s", symbol)
+        return
+    fill = self.executor.execute_order(symbol, "buy", quantity, price)
+    self.positions[symbol] = PositionState(
+        symbol=symbol,
+        quantity=float(fill.get("amount", quantity)),
+        entry_price=float(fill.get("price", price)),
+    )
+    self.notifier.notify(
+        "trade_open",
+        f"[{symbol}] momentum_rsi BUY qty={self.positions[symbol].quantity:.6f} @ {self.positions[symbol].entry_price:.2f}",
+        min_interval=10,
+    )
+
+def _exit_position(self, symbol: str, price: float) -> None:
+    position = self.positions.get(symbol)
+    if not position:
+        return
+    self.executor.execute_order(symbol, "sell", position.quantity, price)
+    pnl = (price - position.entry_price) * position.quantity
+    self.notifier.notify(
+        "trade_close",
+        f"[{symbol}] EXIT qty={position.quantity:.6f} @ {price:.2f} PnL={pnl:.2f}",
+        min_interval=10,
+    )
+    self.positions.pop(symbol, None)
+
+def _risk_allows_entry(self, quantity: float, price: float) -> bool:
+    if not self.risk_manager.check_position_limit(len(self.positions)):
+        return False
+    projected = self._projected_exposure(quantity * price)
+    return self.risk_manager.check_exposure(projected)
+
+def _projected_exposure(self, additional_value: float = 0.0) -> float:
+    equity = self._current_equity()
+    if equity <= 0:
+        return 0.0
+    open_value = 0.0
+    for pos in self.positions.values():
+        open_value += pos.quantity * self.last_prices.get(pos.symbol, pos.entry_price)
+    return (open_value + additional_value) / equity
+
+def _current_equity(self) -> float:
+    price_map = {symbol: price for symbol, price in self.last_prices.items()}
+    return float(self.wallet.total_value(price_map))
+
+def _record_equity_snapshot(self) -> None:
+    equity = self._current_equity()
+    if not self.equity_curve or self.equity_curve[-1][1] != equity:
+        self.equity_curve.append((datetime.utcnow(), equity))
+        if len(self.equity_curve) > 10_000:
+            self.equity_curve = self.equity_curve[-10_000:]
+
+def _equity_series(self) -> pd.Series:
+    if not self.equity_curve:
+        return pd.Series(dtype=float)
+    timestamps, values = zip(*self.equity_curve)
+    return pd.Series(values, index=pd.to_datetime(list(timestamps)))
+
+def _update_risk_pause(self) -> None:
+    series = self._equity_series()
+    if series.empty:
+        return
+    should_pause = self.risk_manager.should_pause_trading(series)
+    if should_pause and not self.paused:
+        loss_pct = self.risk_manager.daily_loss_pct(series)
+        self.notifier.notify(
+            "risk_pause",
+            f"Daily loss limit hit ({loss_pct:.2f}%) — pausing entries",
+            min_interval=300,
+        )
+    elif not should_pause and self.paused:
+        self.notifier.notify("risk_resume", "Trading resumed", min_interval=300)
+    self.paused = should_pause
+
+def _persist_state(self) -> None:
+    equity = self._current_equity()
+    status = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "mode": "paper",
+        "equity": equity,
+        "paused": self.paused,
+        "open_positions": [
+            {
+                "symbol": pos.symbol,
+                "quantity": pos.quantity,
+                "entry_price": pos.entry_price,
+            }
+            for pos in self.positions.values()
+        ],
+    }
+    status_path = status_file()
+    status_path.write_text(json.dumps(status, indent=2))
+
+    if self.equity_curve and pd is not None:
+        equity_path = equity_file()
+        df = pd.DataFrame(self.equity_curve, columns=["timestamp", "equity"])
+        df.to_csv(equity_path, index=False)
+
+def _handle_fill(self, payload: Dict) -> None:
+    record = dict(payload)
+    record["timestamp"] = datetime.utcnow().isoformat()
+    trades_path = trades_file()
+    with trades_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+def _fetch_prices(self) -> Dict[str, float]:  # pragma: no cover - helper for future use
+    return dict(self.last_prices)
+all = ["PaperBot", "PositionState"]
+=== END ===
+=== trading-bot/src/execute/executor.py ===
+from future import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional
+
+from ..broker.paper_wallet import PaperWallet
+from ..config import get_settings
+
+logger = logging.getLogger(name)
+
+@dataclass
+class ExecutionContext:
+mode: str # "paper" or "live"
+wallet: PaperWallet
+order_callback: Optional[Callable] = None
+
+class Executor:
+def init(self, settings=None, wallet: Optional[PaperWallet] = None) -> None:
+self.settings = settings or get_settings()
+default_wallet = PaperWallet(
+balance={"USDT": 10_000.0},
+fee_bps=self.settings.taker_fee_bps,
+slippage_bps=self.settings.slippage_bps,
+)
+self.context = ExecutionContext(
+mode=(
+"live"
+if self.settings.binance_api_key
+and not self.settings.binance_testnet
+else "paper"
+),
+wallet=wallet or default_wallet,
+)
+
+def execute_order(self, symbol: str, side: str, quantity: float, price: float) -> Dict:
+    if self.context.mode == "paper":
+        fill = self.context.wallet.execute(symbol, side, quantity, price)
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "amount": quantity,
+            "price": fill.price,
+            "fee": fill.fee,
+            "equity": self.context.wallet.equity_history[-1][1] if self.context.wallet.equity_history else self.context.wallet.total_value(),
+            "mode": "paper",
+        }
+        logger.info("Paper order executed: %s", payload)
+        if self.context.order_callback:
+            self.context.order_callback(payload)
+        return payload
+    from ..broker.binance_adapter import BinanceAdapter
+
+    adapter = BinanceAdapter(settings=self.settings)
+    response = adapter.create_order(symbol, side, quantity, price)
+    if self.context.order_callback:
+        self.context.order_callback(response)
+    return response
+all = ["Executor", "ExecutionContext"]
+=== END ===
+=== trading-bot/src/execute/notifier.py ===
+from future import annotations
+
+import logging
+import time
+from collections import defaultdict
+from typing import Optional
+
+try: # pragma: no cover - requires network
+from telegram import Bot
+except Exception: # pragma: no cover
+Bot = None
+
+from ..config import get_settings
+
+logger = logging.getLogger(name)
+
+class Notifier:
+def init(self, settings=None) -> None:
+self.settings = settings or get_settings()
+self._bot = None
+self._last_sent = defaultdict(float)
+if Bot and self.settings.telegram_bot_token:
+self._bot = Bot(token=self.settings.telegram_bot_token)
+
+def send(self, message: str) -> None:
+    if not self.settings.telegram_chat_id:
+        logger.debug("Telegram chat id missing, skipping message")
+        return
+    if not self._bot:
+        logger.info("No Telegram bot configured, message would be: %s", message)
+        return
+    try:  # pragma: no cover
+        self._bot.send_message(chat_id=self.settings.telegram_chat_id, text=message)
+    except Exception as exc:
+        logger.error("Failed to send Telegram message: %s", exc)
+
+def notify(self, key: str, message: str, min_interval: int = 30) -> None:
+    now = time.time()
+    if now - self._last_sent[key] < min_interval:
+        logger.debug("Skipping notification %s due to rate limit", key)
+        return
+    self.send(message)
+    self._last_sent[key] = now
+all = ["Notifier"]
+=== END ===
+=== trading-bot/src/execute/portfolio.py ===
+from future import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List
+
+import pandas as pd
+
+@dataclass
+class Position:
+symbol: str
+quantity: float
+entry_price: float
+
+def market_value(self, price: float) -> float:
+    return self.quantity * price
+@dataclass
+class Portfolio:
+cash: float
+positions: Dict[str, Position] = field(default_factory=dict)
+
+def equity(self, prices: Dict[str, float]) -> float:
+    total = self.cash
+    for pos in self.positions.values():
+        total += pos.market_value(prices.get(pos.symbol, pos.entry_price))
+    return total
+
+def update_position(self, symbol: str, quantity: float, price: float) -> None:
+    if quantity == 0:
+        self.positions.pop(symbol, None)
+        return
+    self.positions[symbol] = Position(symbol=symbol, quantity=quantity, entry_price=price)
+
+def open_positions(self) -> List[Position]:
+    return list(self.positions.values())
+all = ["Portfolio", "Position"]
+=== END ===
+=== trading-bot/src/logging_conf.py ===
+from future import annotations
+
+import logging
+from logging.config import dictConfig
+
+LOGGING_CONFIG = {
+"version": 1,
+"disable_existing_loggers": False,
+"formatters": {
+"default": {
+"format": "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+},
+},
+"handlers": {
+"console": {
+"class": "logging.StreamHandler",
+"formatter": "default",
+},
+},
+"root": {
+"handlers": ["console"],
+"level": "INFO",
+},
+}
+
+def configure_logging() -> None:
+"""Configure structured logging for the application."""
+dictConfig(LOGGING_CONFIG)
+logging.getLogger(name).debug("Logging configured")
+
+all = ["configure_logging", "LOGGING_CONFIG"]
+=== END ===
+=== trading-bot/src/main.py ===
+from future import annotations
+
+import argparse
+import logging
+from typing import List, Optional
+
+import pandas as pd
+import uvicorn
+
+from .api.server import app
+from .backtest.engine import BacktestEngine
+from .config import get_settings
+from .data.market_data import MarketDataService, default_market_data_service
+from .data.news_report import build_daily_report, build_weekly_report
+from .execute.bot import PaperBot
+from .execute.notifier import Notifier
+from .logging_conf import configure_logging
+from .state.store import compute_equity_metrics
+from .strategy.breakout_atr import BreakoutATRStrategy
+from .strategy.mean_reversion import MeanReversionStrategy
+from .strategy.momentum_rsi import MomentumRSIStrategy
+from .ui.dashboard import run_dashboard
+
+try: # pragma: no cover - optional dependency
+from apscheduler.schedulers.background import BackgroundScheduler
+except Exception: # pragma: no cover
+BackgroundScheduler = None
+
+logger = logging.getLogger(name)
+
+def _load_prices(service: MarketDataService, symbol: str, timeframe: str, start: str, end: str) -> pd.DataFrame:
+df = service.fetch(symbol, timeframe)
+df = df.loc[start:end] if start or end else df
+return df
+
+def run_backtest(args: argparse.Namespace) -> None:
+settings = get_settings()
+service = default_market_data_service()
+engine = BacktestEngine(settings=settings)
+strategy_map = {
+"momentum": MomentumRSIStrategy(),
+"mean": MeanReversionStrategy(),
+"breakout": BreakoutATRStrategy(),
+}
+strategy = strategy_map.get(args.strategy, MomentumRSIStrategy())
+logger.info("Running backtest for %s", args.symbols)
+frames = []
+for symbol in args.symbols.split(","):
+df = _load_prices(service, symbol.strip(), args.timeframe, args.start, args.end)
+frames.append(df)
+df = pd.concat(frames)
+signals = strategy.generate_signals(df)
+result = engine.run(df, signals, symbol=args.symbols)
+logger.info("Backtest stats: %s", result.stats)
+
+def run_paper(_: argparse.Namespace) -> None:
+settings = get_settings()
+notifier = Notifier(settings=settings)
+schedule_reports(notifier)
+try:
+bot = PaperBot(settings=settings, notifier=notifier)
+except ImportError as exc:
+logger.error("Unable to start paper trading: %s", exc)
+raise SystemExit(1) from exc
+try:
+bot.run_forever()
+except KeyboardInterrupt:
+logger.info("Paper trading stopped by user")
+
+def run_live(_: argparse.Namespace) -> None:
+settings = get_settings()
+if not settings.binance_api_key:
+raise SystemExit("Binance keys missing")
+if settings.binance_testnet:
+raise SystemExit("Disable testnet before starting live trading")
+notifier = Notifier(settings=settings)
+schedule_reports(notifier)
+logger.info("Live trading mode initialised")
+
+def run_report(args: argparse.Namespace) -> None:
+if args.weekly:
+report = build_weekly_report(2.0, -5.0, "momentum_rsi")
+else:
+report = build_daily_report(10_000.0, 1.5)
+logger.info("Report: %s", report)
+
+def run_api(_: argparse.Namespace) -> None:
+uvicorn.run(app, host="0.0.0.0", port=8000)
+
+def run_ui(_: argparse.Namespace) -> None:
+run_dashboard()
+
+def _parse_time_window(spec: str) -> tuple[int, int]:
+hour, minute = spec.split(":")
+return int(hour), int(minute)
+
+def schedule_reports(notifier: Notifier) -> Optional[object]:
+settings = get_settings()
+if BackgroundScheduler is None:
+logger.warning("APScheduler not available, skipping scheduled reports")
+return None
+scheduler = BackgroundScheduler(timezone="Europe/Berlin")
+daily_hour, daily_minute = _parse_time_window(settings.telegram_daily_report_time)
+weekly_hour, weekly_minute = _parse_time_window(settings.telegram_weekly_report_time)
+
+def _daily_job() -> None:
+    metrics = compute_equity_metrics()
+    notifier.notify(
+        "daily_report",
+        build_daily_report(metrics.equity, metrics.wtd),
+        min_interval=60,
+    )
+
+def _weekly_job() -> None:
+    metrics = compute_equity_metrics()
+    notifier.notify(
+        "weekly_report",
+        build_weekly_report(metrics.wtd, metrics.max_drawdown, "momentum_rsi"),
+        min_interval=60,
+    )
+
+scheduler.add_job(_daily_job, "cron", hour=daily_hour, minute=daily_minute)
+scheduler.add_job(
+    _weekly_job,
+    "cron",
+    day_of_week="sun",
+    hour=weekly_hour,
+    minute=weekly_minute,
+)
+scheduler.start()
+logger.info("Scheduled daily and weekly Telegram reports")
+return scheduler
+def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
+parser = argparse.ArgumentParser(description="TradeIt bot controller")
+sub = parser.add_subparsers(dest="command", required=True)
+
+bt = sub.add_parser("backtest")
+bt.add_argument("--symbols", default="BTC/USDT")
+bt.add_argument("--timeframe", default="1h")
+bt.add_argument("--start", default="")
+bt.add_argument("--end", default="")
+bt.add_argument("--strategy", default="momentum")
+bt.set_defaults(func=run_backtest)
+
+sub.add_parser("paper").set_defaults(func=run_paper)
+sub.add_parser("live").set_defaults(func=run_live)
+
+report = sub.add_parser("report")
+group = report.add_mutually_exclusive_group()
+group.add_argument("--daily", action="store_true")
+group.add_argument("--weekly", action="store_true")
+report.set_defaults(func=run_report)
+
+sub.add_parser("api").set_defaults(func=run_api)
+sub.add_parser("ui").set_defaults(func=run_ui)
+
+return parser.parse_args(argv)
+def main(argv: List[str] | None = None) -> None:
+configure_logging()
+args = parse_args(argv)
+args.func(args)
+
+if name == "main":
+main()
+=== END ===
+=== trading-bot/src/ml/init.py ===
+
+=== END ===
+=== trading-bot/src/ml/model_store.py ===
+from future import annotations
+
+from pathlib import Path
+from typing import Any
+
+import joblib
+
+class ModelStore:
+def init(self, base_path: Path) -> None:
+self.base_path = base_path
+self.base_path.mkdir(parents=True, exist_ok=True)
+
+def save(self, model: Any, name: str) -> Path:
+    path = self.base_path / f"{name}.joblib"
+    joblib.dump(model, path)
+    return path
+
+def load(self, name: str) -> Any:
+    path = self.base_path / f"{name}.joblib"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return joblib.load(path)
+all = ["ModelStore"]
+=== END ===
+=== trading-bot/src/ml/online_model.py ===
+from future import annotations
+
+from dataclasses import dataclass
+from typing import List
+
+try:
+import numpy as np
+except ImportError: # pragma: no cover - optional dependency
+np = None # type: ignore
+try:
+import pandas as pd
+except ImportError: # pragma: no cover - optional dependency
+pd = None # type: ignore
+try:
+from sklearn.linear_model import SGDClassifier
+from sklearn.preprocessing import StandardScaler
+except ImportError: # pragma: no cover - optional dependency
+SGDClassifier = None # type: ignore
+StandardScaler = None # type: ignore
+
+@dataclass
+class OnlineModel:
+feature_cols: List[str]
+probability_threshold: float = 0.55
+
+def __post_init__(self) -> None:
+    if StandardScaler is None or SGDClassifier is None:
+        raise ImportError("scikit-learn is required for OnlineModel")
+    self.scaler = StandardScaler()
+    self.model = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True)
+    self.is_init = False
+    self._model_initialized = False
+
+def _prepare(self, X: pd.DataFrame) -> np.ndarray:
+    if pd is None or np is None:
+        raise ImportError("pandas and numpy are required for online model")
+    data = X[self.feature_cols].values
+    if not self.is_init:
+        self.scaler.fit(data)
+        self.is_init = True
+    else:
+        self.scaler.partial_fit(data)
+    return self.scaler.transform(data)
+
+def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+    if pd is None or np is None:
+        raise ImportError("pandas and numpy are required for online model")
+    if not self._model_initialized:
+        return np.full((len(X), 2), 0.5)
+    data = self.scaler.transform(X[self.feature_cols].values)
+    return self.model.predict_proba(data)
+
+def partial_fit_on_barclose(self, X: pd.DataFrame, y: np.ndarray) -> None:
+    if pd is None or np is None:
+        raise ImportError("pandas and numpy are required for online model")
+    if len(X) == 0:
+        return
+    mask = ~np.isnan(y)
+    if not mask.any():
+        return
+    X_fit = X.loc[mask]
+    y_fit = y[mask]
+    if X_fit.empty:
+        return
+    data = self._prepare(X_fit)
+    classes = np.array([0, 1])
+    if not self._model_initialized:
+        self.model.partial_fit(data, y_fit, classes=classes)
+        self._model_initialized = True
+    else:
+        self.model.partial_fit(data, y_fit)
+
+def should_enter(self, probability: float) -> bool:
+    return probability >= self.probability_threshold
+all = ["OnlineModel"]
+=== END ===
+=== trading-bot/src/state/init.py ===
+from .store import (
+EquityMetrics,
+compute_equity_metrics,
+load_equity_series,
+load_status,
+load_trades,
+state_dir,
+status_file,
+equity_file,
+trades_file,
+)
+
+all = [
+"EquityMetrics",
+"compute_equity_metrics",
+"load_equity_series",
+"load_status",
+"load_trades",
+"state_dir",
+"status_file",
+"equity_file",
+"trades_file",
+]
+=== END ===
+=== trading-bot/src/state/store.py ===
+from future import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional
+
+try: # pragma: no cover - optional heavy deps
+import pandas as pd
+except ImportError: # pragma: no cover
+pd = None # type: ignore
+
+from ..config import get_settings
+
+logger = logging.getLogger(name)
+
+@dataclass
+class EquityMetrics:
+equity: float
+wtd: float
+ytd: float
+max_drawdown: float
+sharpe: float
+
+def state_dir() -> Path:
+settings = get_settings()
+path = Path(settings.state_path)
+path.mkdir(parents=True, exist_ok=True)
+return path
+
+def status_file() -> Path:
+return state_dir() / "status.json"
+
+def equity_file() -> Path:
+return state_dir() / "equity.csv"
+
+def trades_file() -> Path:
+return state_dir() / "trades.jsonl"
+
+def load_status(default_mode: Optional[str] = None) -> Dict[str, object]:
+path = status_file()
+if path.exists():
+try:
+return json.loads(path.read_text())
+except json.JSONDecodeError as exc: # pragma: no cover - file corruption
+logger.error("Failed to parse status.json: %s", exc)
+if default_mode is None:
+settings = get_settings()
+default_mode = "paper" if (settings.binance_testnet or not settings.binance_api_key) else "live"
+return {"equity": 0.0, "open_positions": [], "mode": default_mode, "paused": False}
+
+def load_equity_series():
+if pd is None:
+return None
+path = equity_file()
+if not path.exists():
+return None
+try:
+df = pd.read_csv(path, parse_dates=["timestamp"])
+except Exception as exc: # pragma: no cover - IO issues
+logger.error("Failed to load equity.csv: %s", exc)
+return None
+if df.empty:
+return None
+df = df.sort_values("timestamp")
+df.set_index("timestamp", inplace=True)
+return df["equity"]
+
+def _week_start(ts: datetime) -> datetime:
+return (ts - pd.Timedelta(days=ts.weekday())).replace(hour=0, minute=0, second=0, microsecond=0) # type: ignore[attr-defined]
+
+def _year_start(ts: datetime) -> datetime:
+return ts.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+def compute_equity_metrics() -> EquityMetrics:
+series = load_equity_series()
+if series is None or series.empty:
+return EquityMetrics(0.0, 0.0, 0.0, 0.0, 0.0)
+
+latest = float(series.iloc[-1])
+last_ts = series.index[-1].to_pydatetime()
+
+wtd = 0.0
+ytd = 0.0
+if pd is not None:
+    week_start = _week_start(last_ts)
+    week_series = series.loc[series.index >= week_start]
+    if not week_series.empty:
+        wtd = float((week_series.iloc[-1] / week_series.iloc[0] - 1.0) * 100.0)
+
+    year_start = _year_start(last_ts)
+    year_series = series.loc[series.index >= year_start]
+    if not year_series.empty:
+        ytd = float((year_series.iloc[-1] / year_series.iloc[0] - 1.0) * 100.0)
+
+returns = series.pct_change().dropna()
+sharpe = 0.0
+if not returns.empty:
+    sharpe = float(returns.mean() / (returns.std() + 1e-9) * (len(returns) ** 0.5))
+running_max = series.cummax()
+max_drawdown = float(((series / running_max) - 1.0).min() * 100.0)
+
+return EquityMetrics(
+    equity=latest,
+    wtd=wtd,
+    ytd=ytd,
+    max_drawdown=max_drawdown,
+    sharpe=sharpe,
+)
+def load_trades(limit: int = 50):
+if pd is None:
+return None
+path = trades_file()
+if not path.exists():
+return pd.DataFrame(columns=["timestamp", "symbol", "side", "price", "amount", "fee"])
+try:
+df = pd.read_json(path, lines=True)
+except ValueError as exc: # pragma: no cover - parse errors
+logger.error("Failed to parse trades.jsonl: %s", exc)
+return pd.DataFrame(columns=["timestamp", "symbol", "side", "price", "amount", "fee"])
+if limit:
+df = df.tail(limit)
+return df
+
+all = [
+"EquityMetrics",
+"compute_equity_metrics",
+"load_equity_series",
+"load_status",
+"load_trades",
+"state_dir",
+"status_file",
+"equity_file",
+"trades_file",
+]
+=== END ===
+=== trading-bot/src/strategy/base.py ===
+from future import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+import pandas as pd
+
+class Strategy(Protocol):
+def generate_signals(self, df: pd.DataFrame) -> pd.Series: ...
+def name(self) -> str: ...
+
+@dataclass
+class SignalResult:
+entries: pd.Series
+exits: pd.Series
+
+all = ["Strategy", "SignalResult"]
+=== END ===
+=== trading-bot/src/strategy/breakout_atr.py ===
+from future import annotations
+
+try:
+import pandas as pd
+except ImportError: # pragma: no cover - optional dependency
+pd = None # type: ignore
+
+from .base import SignalResult
+from ..data.features import compute_features
+
+class BreakoutATRStrategy:
+def init(self, lookback: int = 20, atr_mult: float = 1.5) -> None:
+self.lookback = lookback
+self.atr_mult = atr_mult
+
+def name(self) -> str:
+    return "breakout_atr"
+
+def generate_signals(self, df: pd.DataFrame) -> SignalResult:
+    if pd is None:
+        raise ImportError("pandas is required for strategy signals")
+    features = compute_features(df)
+    rolling_high = df["close"].rolling(window=self.lookback, min_periods=1).max()
+    trigger = rolling_high + features["atr"] * self.atr_mult
+    entries = (df["close"] > trigger.shift(1)).astype(int)
+    trailing_stop = (df["close"] - features["atr"] * self.atr_mult)
+    exits = (df["close"] < trailing_stop.shift(1)).astype(int)
+    return SignalResult(entries=entries, exits=exits.fillna(0))
+all = ["BreakoutATRStrategy"]
+=== END ===
+=== trading-bot/src/strategy/ensemble.py ===
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Sequence, Tuple
+
+try:
+import pandas as pd
+except ImportError: # pragma: no cover - optional dependency
+pd = None # type: ignore
+
+from .base import SignalResult
+
+logger = logging.getLogger(name)
+
+@dataclass
+class StrategyPerformance:
+name: str
+equity_curve: pd.Series
+
+def recent_return(self, periods: int = 24) -> float:
+    if len(self.equity_curve) < 2:
+        return 0.0
+    tail = self.equity_curve.tail(periods)
+    return tail.iloc[-1] / tail.iloc[0] - 1
+@dataclass
+class EnsembleSelector:
+lookback: int = 24
+default_strategy: str = "momentum_rsi"
+performances: Dict[str, StrategyPerformance] = field(default_factory=dict)
+
+def update_performance(self, name: str, equity_curve: pd.Series) -> None:
+    if pd is None:
+        raise ImportError("pandas is required for ensemble management")
+    self.performances[name] = StrategyPerformance(name=name, equity_curve=equity_curve)
+
+def select(self) -> str:
+    if not self.performances:
+        return self.default_strategy
+    best = max(self.performances.values(), key=lambda perf: perf.recent_return(self.lookback))
+    logger.debug("Selected strategy %s based on recent performance", best.name)
+    if best.recent_return(self.lookback) <= 0:
+        return self.default_strategy
+    return best.name
+
+def blend_signals(self, signals: Dict[str, SignalResult]) -> SignalResult:
+    chosen = self.select()
+    selected = signals.get(chosen)
+    if selected is None:
+        logger.warning("Strategy %s not present, falling back to default", chosen)
+        selected = signals[self.default_strategy]
+    return selected
+all = ["EnsembleSelector"]
+=== END ===
+=== trading-bot/src/strategy/mean_reversion.py ===
+from future import annotations
+
+try:
+import pandas as pd
+except ImportError: # pragma: no cover - optional dependency
+pd = None # type: ignore
+
+from .base import SignalResult
+from ..data.features import compute_features
+
+class MeanReversionStrategy:
+def init(self, rsi_entry: float = 30.0, rsi_exit: float = 45.0) -> None:
+self.rsi_entry = rsi_entry
+self.rsi_exit = rsi_exit
+
+def name(self) -> str:
+    return "mean_reversion"
+
+def generate_signals(self, df: pd.DataFrame) -> SignalResult:
+    if pd is None:
+        raise ImportError("pandas is required for strategy signals")
+    features = compute_features(df)
+    entries = ((features["rsi"] < self.rsi_entry) & (df["close"] < features["bollinger_low"])).astype(int)
+    exits = ((features["rsi"] > self.rsi_exit) | (df["close"] >= features["bollinger_mid"])).astype(int)
+    return SignalResult(entries=entries, exits=exits)
+all = ["MeanReversionStrategy"]
+=== END ===
+=== trading-bot/src/strategy/momentum_rsi.py ===
+from future import annotations
+
+try:
+import pandas as pd
+except ImportError: # pragma: no cover - optional dependency
+pd = None # type: ignore
+
+from .base import SignalResult
+from ..data.features import compute_features
+
+class MomentumRSIStrategy:
+def init(
+self,
+rsi_entry: float = 55.0,
+rsi_exit: float = 50.0,
+vol_threshold: float = 0.02,
+) -> None:
+self.rsi_entry = rsi_entry
+self.rsi_exit = rsi_exit
+self.vol_threshold = vol_threshold
+
+def name(self) -> str:
+    return "momentum_rsi"
+
+def generate_signals(self, df: pd.DataFrame) -> SignalResult:
+    if pd is None:
+        raise ImportError("pandas is required for strategy signals")
+    features = compute_features(df)
+    atr_ratio = (features["atr"] / df["close"]).replace([float("inf"), float("-inf")], 0.0).fillna(0.0)
+    volatility_ok = atr_ratio < self.vol_threshold
+    long_condition = (features["sma_50"] > features["sma_200"]) & (features["rsi"] > self.rsi_entry) & volatility_ok
+    exit_condition = (features["rsi"] < self.rsi_exit) | (features["sma_50"] < features["sma_200"])
+
+    entries = long_condition.astype(int).shift(1).fillna(0).astype(int)
+    exits = exit_condition.astype(int).shift(1).fillna(0).astype(int)
+    return SignalResult(entries=entries, exits=exits)
+all = ["MomentumRSIStrategy"]
+=== END ===
+=== trading-bot/src/strategy/position_sizing.py ===
+from future import annotations
+
+def position_size(
+equity: float,
+entry_price: float,
+atr: float,
+risk_per_trade: float,
+stop_atr_mult: float,
+) -> float:
+"""Berechnet Stückzahl so, dass ATR*mult Verlust ~ risk_per_trade * equity entspricht."""
+if equity <= 0 or entry_price <= 0 or atr <= 0:
+return 0.0
+risk_amount = equity * risk_per_trade
+stop_distance = atr * stop_atr_mult
+if stop_distance <= 0:
+return 0.0
+quantity = risk_amount / stop_distance
+return max(float(quantity), 0.0)
+
+all = ["position_size"]
+=== END ===
+=== trading-bot/src/strategy/risk.py ===
+from dataclasses import dataclass
+from datetime import datetime
+import pandas as pd
+
+from ..config import get_settings
+
+@dataclass
+class RiskLimits:
+max_concurrent: int
+max_exposure: float
+max_daily_loss: float
+
+class RiskManager:
+def init(self, settings=None) -> None:
+self.settings = settings or get_settings()
+self.limits = RiskLimits(
+max_concurrent=self.settings.max_concurrent_positions,
+max_exposure=self.settings.max_total_exposure,
+max_daily_loss=self.settings.max_daily_loss,
+)
+
+def check_position_limit(self, open_positions: int) -> bool:
+    return open_positions < self.limits.max_concurrent
+
+def check_exposure(self, exposure: float) -> bool:
+    return exposure <= self.limits.max_exposure
+
+def daily_loss_pct(self, equity_curve: pd.Series) -> float:
+    today = equity_curve[pd.to_datetime(equity_curve.index).date == datetime.utcnow().date()]
+    if today.empty:
+        return 0.0
+    drawdown = today.iloc[-1] / today.iloc[0] - 1.0
+    return float(drawdown * 100.0)
+
+def check_daily_loss(self, equity_curve: pd.Series) -> bool:
+    loss_pct = self.daily_loss_pct(equity_curve)
+    return loss_pct >= -self.limits.max_daily_loss * 100.0
+
+def should_pause_trading(self, equity_curve: pd.Series) -> bool:
+    loss_pct = self.daily_loss_pct(equity_curve)
+    if loss_pct <= -self.limits.max_daily_loss * 100.0:
+        return True
+    return False
+all = ["RiskManager", "RiskLimits"]
+=== END ===
+=== trading-bot/src/ui/dashboard.py ===
+from future import annotations
+
+try:
+import pandas as pd
+except ImportError: # pragma: no cover - optional dependency
+pd = None # type: ignore
+try:
+import streamlit as st
+except ImportError: # pragma: no cover - optional dependency
+st = None # type: ignore
+
+from ..config import get_settings
+from ..state.store import compute_equity_metrics, load_equity_series, load_status, load_trades
+
+def run_dashboard() -> None:
+if st is None or pd is None:
+raise ImportError("streamlit and pandas are required for the dashboard")
+st.set_page_config(page_title="TradeIt Bot", layout="wide")
+settings = get_settings()
+st.title("TradeIt Bot Overview")
+status = load_status()
+mode = status.get("mode") or ("Paper" if not settings.binance_api_key else "Live")
+st.sidebar.write("Mode", mode.capitalize())
+if status.get("paused"):
+st.sidebar.warning("Trading pausiert (Daily loss limit)")
+
+st.subheader("Equity Curve")
+equity_series = load_equity_series()
+if equity_series is not None and not equity_series.empty:
+    equity_df = equity_series.to_frame(name="equity")
+    st.line_chart(equity_df)
+else:
+    st.info("Noch keine Equity-Daten verfügbar")
+
+st.subheader("Open Positions")
+open_positions = status.get("open_positions", [])
+if open_positions:
+    st.table(pd.DataFrame(open_positions))
+else:
+    st.write("Keine offenen Positionen")
+
+trades = load_trades()
+st.subheader("Recent Trades")
+if trades is not None and not trades.empty:
+    st.dataframe(trades.sort_values("timestamp", ascending=False))
+else:
+    st.write("Noch keine Trades")
+
+st.subheader("Equity & Risk Metrics")
+metrics = compute_equity_metrics()
+metrics_col1, metrics_col2 = st.columns(2)
+metrics_col1.metric("Equity", f"{metrics.equity:,.2f} USDT")
+metrics_col1.metric("Sharpe", f"{metrics.sharpe:.2f}")
+metrics_col2.metric("Max Drawdown", f"{metrics.max_drawdown:.2f}%")
+metrics_col2.metric("WTD", f"{metrics.wtd:.2f}%")
+
+if settings.allow_toggle:
+    col1, col2 = st.columns(2)
+    if col1.button("Start"):
+        st.toast("Start command sent")
+    if col2.button("Stop"):
+        st.toast("Stop command sent")
+if name == "main":
+run_dashboard()
+
+all = ["run_dashboard"]
+=== END ===
+END_MANIFEST

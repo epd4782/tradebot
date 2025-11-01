@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-try:
+try: # pragma: no cover - optional heavy deps
 import pandas as pd
 except ImportError: # pragma: no cover
 pd = None # type: ignore

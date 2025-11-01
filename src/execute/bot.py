@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime datetime
+from datetime import datetime
 from typing import Dict, Optional
 
 try: # pragma: no cover - optional heavy deps
@@ -127,15 +127,22 @@ def run_once(self) -> None:
         price = float(df["close"].iloc[-1])
 
         self._update_model(symbol, df)
+        probability = self._latest_probability(features)
+
+        if symbol in self.positions and exit_signal:
+            self._exit_position(symbol, price)
 
         if self.paused:
             continue
 
         if entry_signal and symbol not in self.positions:
+            if self.model and not self.model.should_enter(probability):
+                logger.debug("ML gate blocked entry for %s (p=%.3f)", symbol, probability)
+                continue
             self._enter_position(symbol, price, atr)
-        elif exit_signal and symbol in self.positions:
-            self._exit_position(symbol, price)
 
+    # persist state after processing all symbols
+    self._record_equity_snapshot()
     self._persist_state()
 
 def _fetch_frame(self, symbol: str):
@@ -154,18 +161,32 @@ def _fetch_frame(self, symbol: str):
         logger.error("Failed to fetch market data for %s: %s", symbol, exc)
         return None
 
-def _update_model(self, symbol: str, df: pd.DataFrame) -> None:
+def _update_model(self, symbol: str, df) -> None:
     if self.model is None:
         return
-    try:
-        features, labels = make_feature_label(df)
-    except Exception as exc:
-        logger.debug("Unable to prepare features for ML model: %s", exc)
+    features, labels = make_feature_label(df)
+    if features.empty:
         return
-    if symbol in self.last_trained and self.last_trained[symbol] == features.index[-1]:
+    current_bar = df.index[-1]
+    if symbol in self.last_trained:
+        features = features.loc[features.index > self.last_trained[symbol]]
+    features = features.loc[features.index < current_bar]
+    if features.empty:
         return
-    self.model.partial_fit_on_barclose(features[self.model_features], labels.values)
+    y = labels.loc[features.index].to_numpy()
+    self.model.partial_fit_on_barclose(features, y)
     self.last_trained[symbol] = features.index[-1]
+
+def _latest_probability(self, features) -> float:
+    if self.model is None:
+        return 1.0
+    try:
+        sample = features.tail(1)[self.model.feature_cols]
+        proba = self.model.predict_proba(sample)[0, 1]
+        return float(proba)
+    except Exception as exc:  # pragma: no cover - model edge cases
+        logger.debug("Probability prediction failed: %s", exc)
+        return 1.0
 
 def _enter_position(self, symbol: str, price: float, atr: float) -> None:
     equity = self._current_equity()

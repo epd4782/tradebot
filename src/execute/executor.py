@@ -1,10 +1,9 @@
 ﻿from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
-from ..broker.binance_adapter import BinanceAdapter
 from ..broker.paper_wallet import PaperWallet
 from ..config import get_settings
 
@@ -12,17 +11,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ExecutionContext:
-equity: float = 10_000.0
-equity_curve: list = field(default_factory=list)
-order_callback: Optional[Callable[[Dict], None]] = None
-wallet: PaperWallet = field(default_factory=lambda: PaperWallet(balance={"USDT": 10_000.0}))
-mode: str = "paper"
+mode: str # "paper" or "live"
+wallet: PaperWallet
+order_callback: Optional[Callable] = None
 
 class Executor:
-def __init__(self, settings=None) -> None:
+def __init__(self, settings=None, wallet: Optional[PaperWallet] = None) -> None:
 self.settings = settings or get_settings()
-self.context = ExecutionContext()
-self.adapter: Optional[BinanceAdapter] = None
+default_wallet = PaperWallet(
+balance={"USDT": 10_000.0},
+fee_bps=self.settings.taker_fee_bps,
+slippage_bps=self.settings.slippage_bps,
+)
+self.context = ExecutionContext(
+mode=(
+"live"
+if self.settings.binance_api_key
+and not self.settings.binance_testnet
+else "paper"
+),
+wallet=wallet or default_wallet,
+)
 
 def execute_order(self, symbol: str, side: str, quantity: float, price: float) -> Dict:
     if self.context.mode == "paper":
@@ -40,7 +49,9 @@ def execute_order(self, symbol: str, side: str, quantity: float, price: float) -
         if self.context.order_callback:
             self.context.order_callback(payload)
         return payload
-    adapter = self.adapter or BinanceAdapter(settings=self.settings)
+    from ..broker.binance_adapter import BinanceAdapter
+
+    adapter = BinanceAdapter(settings=self.settings)
     response = adapter.create_order(symbol, side, quantity, price)
     if self.context.order_callback:
         self.context.order_callback(response)

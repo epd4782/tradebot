@@ -28,7 +28,8 @@ def __post_init__(self) -> None:
         raise ImportError("scikit-learn is required for OnlineModel")
     self.scaler = StandardScaler()
     self.model = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True)
-    self.is_init = False        self._model_initialized = False
+    self.is_init = False
+    self._model_initialized = False
 
 def _prepare(self, X: pd.DataFrame) -> np.ndarray:
     if pd is None or np is None:
