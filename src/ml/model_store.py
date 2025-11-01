@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
@@ -6,7 +6,7 @@ from typing import Any
 import joblib
 
 class ModelStore:
-def init(self, base_path: Path) -> None:
+def __init__(self, base_path: Path) -> None:
 self.base_path = base_path
 self.base_path.mkdir(parents=True, exist_ok=True)
 

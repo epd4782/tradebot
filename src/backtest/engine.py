@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Iterable
@@ -21,13 +21,13 @@ trades: pd.DataFrame
 stats: Dict[str, float]
 
 class BacktestEngine:
-def init(self, cash: float = 10_000.0, commission: float = 0.001):
+def __init__(self, cash: float = 10_000.0, commission: float = 0.001):
 self.cash = cash
 self.commission = commission
 
 def run(self, df: pd.DataFrame, signals: SignalResult, symbol: str) -> BacktestResult:
     class WrappedStrategy(Strategy):
-        def init(inner_self):
+        def __init__(inner_self):
             inner_self.signal_entries = signals.entries.astype(bool)
             inner_self.signal_exits = signals.exits.astype(bool)
 

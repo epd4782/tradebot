@@ -9,7 +9,7 @@ from .base import SignalResult
 from ..data.features import compute_features
 
 class MeanReversionStrategy:
-def init(self, rsi_entry: float = 30.0, rsi_exit: float = 45.0) -> None:
+def __init__(self, rsi_entry: float = 30.0, rsi_exit: float = 45.0) -> None:
 self.rsi_entry = rsi_entry
 self.rsi_exit = rsi_exit
 

@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(file).resolve().parents[1]))
 from src.broker import binance_adapter
 
 class DummyClient:
-def init(self):
+def __init__(self):
 self.amount_precision = []
 self.price_precision = []
 self.last_order = None

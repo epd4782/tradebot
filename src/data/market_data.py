@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert
 
 from ..config import get_settings
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 metadata = MetaData()
 

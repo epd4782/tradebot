@@ -1,10 +1,10 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from typing import Dict, List
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Fill:
@@ -12,7 +12,7 @@ price: float
 fee: float
 
 class PaperWallet:
-def init(self, balance: Dict[str, float]):
+def __init__(self, balance: Dict[str, float]):
 self.balance = balance.copy()
 self.equity_history: List[tuple[str, float]] = []
 

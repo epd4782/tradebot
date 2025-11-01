@@ -11,7 +11,7 @@ max_exposure: float
 max_daily_loss: float
 
 class RiskManager:
-def init(self, settings=None) -> None:
+def __init__(self, settings=None) -> None:
 self.settings = settings or get_settings()
 self.limits = RiskLimits(
 max_concurrent=self.settings.max_concurrent_positions,

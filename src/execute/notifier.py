@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import logging
 import time
@@ -12,10 +12,10 @@ Bot = None
 
 from ..config import get_settings
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 class Notifier:
-def init(self, settings=None) -> None:
+def __init__(self, settings=None) -> None:
 self.settings = settings or get_settings()
 self._bot = None
 self._last_sent = defaultdict(float)

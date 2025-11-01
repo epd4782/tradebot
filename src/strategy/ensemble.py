@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ pd = None # type: ignore
 
 from .base import SignalResult
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class StrategyPerformance:

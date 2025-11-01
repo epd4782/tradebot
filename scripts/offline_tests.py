@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import importlib
 import importlib.util
@@ -21,7 +21,7 @@ class SkipTest(Exception):
 """Raised to indicate a skipped test or module."""
 
 class MonkeyPatch:
-def init(self) -> None:
+def __init__(self) -> None:
 self._env_changes: list[Tuple[str, str | None]] = []
 self._attr_changes: list[Tuple[Any, str, Any, bool]] = []
 

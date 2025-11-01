@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
@@ -8,7 +8,7 @@ from ..broker.binance_adapter import BinanceAdapter
 from ..broker.paper_wallet import PaperWallet
 from ..config import get_settings
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ExecutionContext:
@@ -19,7 +19,7 @@ wallet: PaperWallet = field(default_factory=lambda: PaperWallet(balance={"USDT":
 mode: str = "paper"
 
 class Executor:
-def init(self, settings=None) -> None:
+def __init__(self, settings=None) -> None:
 self.settings = settings or get_settings()
 self.context = ExecutionContext()
 self.adapter: Optional[BinanceAdapter] = None

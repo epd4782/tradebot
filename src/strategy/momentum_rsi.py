@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 try:
 import pandas as pd
@@ -9,7 +9,7 @@ from .base import SignalResult
 from ..data.features import compute_features
 
 class MomentumRSIStrategy:
-def init(
+def __init__(
 self,
 rsi_entry: float = 55.0,
 rsi_exit: float = 50.0,

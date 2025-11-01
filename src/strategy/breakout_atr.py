@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 try:
 import pandas as pd
@@ -9,7 +9,7 @@ from .base import SignalResult
 from ..data.features import compute_features
 
 class BreakoutATRStrategy:
-def init(self, lookback: int = 20, atr_mult: float = 1.5) -> None:
+def __init__(self, lookback: int = 20, atr_mult: float = 1.5) -> None:
 self.lookback = lookback
 self.atr_mult = atr_mult
 

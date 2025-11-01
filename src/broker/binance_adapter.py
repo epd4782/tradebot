@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import logging
 import uuid
@@ -10,7 +10,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from ..config import get_settings
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class OrderResponse:
@@ -46,7 +46,7 @@ def _order_id() -> str:
 return f"bot-{uuid.uuid4().hex[:16]}"
 
 class BinanceAdapter:
-def init(self, settings=None):
+def __init__(self, settings=None):
 self.settings = settings or get_settings()
 self.exchange = _client()
 

@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -14,7 +14,7 @@ pd = None # type: ignore
 
 from ..config import get_settings
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class EquityMetrics:

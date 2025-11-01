@@ -1,4 +1,4 @@
-﻿from future import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -23,7 +23,7 @@ from ..strategy.momentum_rsi import MomentumRSIStrategy
 from ..strategy.position_sizing import position_size
 from ..strategy.risk import RiskManager
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class PositionState:
